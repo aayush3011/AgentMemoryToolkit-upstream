@@ -1,58 +1,45 @@
-"""AgentMemory: local and cloud agent memory management.
+"""AsyncAgentMemory: async variant of AgentMemory.
 
-Thin orchestrator that composes :class:`CosmosMemoryStore`,
-:class:`EmbeddingsClient`, and :class:`ProcessingClient` for Cosmos DB
-CRUD, vector search, and Azure Durable Functions processing.
+Thin async orchestrator that composes :class:`AsyncCosmosMemoryStore`,
+:class:`AsyncEmbeddingsClient`, and :class:`AsyncProcessingClient`.
+Local operations remain synchronous (in-memory list).
+
+Import from ``agent_memory_toolkit.aio``::
+
+    from agent_memory_toolkit.aio import AsyncAgentMemory
 """
 
+from __future__ import annotations
+
 import logging
-import os
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from .cosmos_memory_client import CosmosMemoryStore
-from .embeddings import EmbeddingsClient
-from .exceptions import CosmosNotConnectedError, MemoryNotFoundError, ValidationError
-from .models import MemoryRecord
-from .processing import ProcessingClient
-from ._utils import VALID_ROLES, VALID_TYPES, _make_memory, _resolve_embedding_dimensions
+from agent_memory_toolkit.aio.cosmos_memory_client import AsyncCosmosMemoryStore
+from agent_memory_toolkit.aio.embeddings import AsyncEmbeddingsClient
+from agent_memory_toolkit.aio.processing import AsyncProcessingClient
+from agent_memory_toolkit.exceptions import CosmosNotConnectedError, MemoryNotFoundError, ValidationError
+from agent_memory_toolkit._utils import VALID_ROLES, VALID_TYPES, _make_memory, _resolve_embedding_dimensions
+from agent_memory_toolkit.models import MemoryRecord
 
 logger = logging.getLogger(__name__)
 
 
-class AgentMemory:
-    """Manages agent memories with local storage and Cosmos DB.
+class AsyncAgentMemory:
+    """Async variant of :class:`AgentMemory`.
 
-    Authentication uses ``azure-identity`` by default.  If no explicit
-    credential is passed for Cosmos DB or AI Foundry, a
-    ``DefaultAzureCredential`` is created automatically.
+    * Cosmos DB operations use ``azure.cosmos.aio``
+    * Embeddings use ``openai.AsyncAzureOpenAI``
+    * Processing uses ``aiohttp``
+    * Local operations remain synchronous (in-memory list)
 
-    Parameters
-    ----------
-    cosmos_endpoint : str, optional
-        The Cosmos DB account endpoint URL.
-    cosmos_credential : TokenCredential, optional
-        Azure credential for Cosmos DB.
-    cosmos_database : str, optional
-        Cosmos DB database name.
-    cosmos_container : str, optional
-        Cosmos DB container name.
-    ai_foundry_endpoint : str, optional
-        Azure OpenAI endpoint URL for embeddings.
-    ai_foundry_credential : TokenCredential, optional
-        Azure credential for the AI Foundry endpoint.
-    ai_foundry_api_key : str, optional
-        API key for Azure OpenAI (takes precedence over credential).
-    embedding_model : str, optional
-        Embedding model deployment name (default ``text-embedding-3-large``).
-    embedding_dimensions : int, optional
-        Dimensionality of embedding vectors.
-    adf_endpoint : str, optional
-        Base URL for the Azure Durable Functions API.
-    adf_key : str, optional
-        Function-level key for authenticating to the Azure Function.
-    use_default_credential : bool, optional
-        Automatically create ``DefaultAzureCredential`` when ``True``.
+    Supports the async context-manager protocol::
+
+        async with AsyncAgentMemory() as mem:
+            await mem.connect_cosmos()
+            ...
+
+    Parameters are identical to :class:`AgentMemory`.
     """
 
     def __init__(
@@ -88,14 +75,16 @@ class AgentMemory:
         self._adf_endpoint = adf_endpoint
         self._adf_key = adf_key
 
-        # Resolve credentials via DefaultAzureCredential when needed
+        # Resolve credentials via async DefaultAzureCredential when needed
+        self._owns_credential = False
         if use_default_credential:
             needs_cosmos = self._cosmos_credential is None
             needs_embed = self._ai_foundry_credential is None
             if needs_cosmos or needs_embed:
                 try:
-                    from azure.identity import DefaultAzureCredential
+                    from azure.identity.aio import DefaultAzureCredential
                     _default = DefaultAzureCredential()
+                    self._owns_credential = True
                 except ImportError:
                     _default = None
                 if needs_cosmos:
@@ -104,23 +93,45 @@ class AgentMemory:
                     self._ai_foundry_credential = _default
 
         # Sub-clients (cosmos store created on connect)
-        self._cosmos_store: Optional[CosmosMemoryStore] = None
-        self._embeddings_client = EmbeddingsClient(
+        self._cosmos_store: Optional[AsyncCosmosMemoryStore] = None
+        self._embeddings_client = AsyncEmbeddingsClient(
             endpoint=self._ai_foundry_endpoint,
             credential=self._ai_foundry_credential,
             api_key=self._ai_foundry_api_key,
             model=self._embedding_model,
             dimensions=self._embedding_dimensions,
         )
-        self._processing_client = ProcessingClient(
+        self._processing_client = AsyncProcessingClient(
             endpoint=self._adf_endpoint,
             key=self._adf_key,
         )
 
-        logger.info("AgentMemory initialized")
+        logger.info("AsyncAgentMemory initialized")
 
     # ------------------------------------------------------------------
-    # Local operations
+    # Async context manager
+    # ------------------------------------------------------------------
+
+    async def __aenter__(self) -> "AsyncAgentMemory":
+        return self
+
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
+        await self.close()
+
+    async def close(self) -> None:
+        """Close all underlying async clients."""
+        if self._cosmos_store is not None:
+            await self._cosmos_store.close()
+        await self._embeddings_client.close()
+        await self._processing_client.close()
+        if self._owns_credential and self._cosmos_credential is not None:
+            close = getattr(self._cosmos_credential, "close", None)
+            if close is not None:
+                await close()
+        logger.info("AsyncAgentMemory closed")
+
+    # ------------------------------------------------------------------
+    # Local operations (synchronous - in-memory list)
     # ------------------------------------------------------------------
 
     def add_local(
@@ -229,17 +240,17 @@ class AgentMemory:
         raise MemoryNotFoundError(memory_id=memory_id)
 
     # ------------------------------------------------------------------
-    # Cosmos DB connection
+    # Cosmos DB connection (async)
     # ------------------------------------------------------------------
 
-    def connect_cosmos(
+    async def connect_cosmos(
         self,
         endpoint: Optional[str] = None,
         credential: Optional[Any] = None,
         database: Optional[str] = None,
         container: Optional[str] = None,
     ) -> None:
-        """Establish a connection to a Cosmos DB container.
+        """Establish an async connection to a Cosmos DB container.
 
         Parameters override whatever was set in ``__init__``.  After this
         call the Cosmos CRUD methods are ready to use.
@@ -249,15 +260,15 @@ class AgentMemory:
         self._cosmos_database = database or self._cosmos_database
         self._cosmos_container = container or self._cosmos_container
 
-        self._cosmos_store = CosmosMemoryStore(
+        self._cosmos_store = AsyncCosmosMemoryStore(
             endpoint=self._cosmos_endpoint,
             credential=self._cosmos_credential,
             database=self._cosmos_database,
             container=self._cosmos_container,
         )
-        self._cosmos_store.connect()
+        await self._cosmos_store.connect()
 
-    def create_memory_store(
+    async def create_memory_store(
         self,
         database: Optional[str] = None,
         container: Optional[str] = None,
@@ -268,7 +279,7 @@ class AgentMemory:
         distance_function: Optional[str] = None,
         full_text_language: Optional[str] = None,
     ) -> None:
-        """Create the Cosmos DB database and container for memories.
+        """Create the Cosmos DB database and container for memories (async).
 
         After successful creation the instance is connected and ready
         for CRUD operations.
@@ -278,13 +289,13 @@ class AgentMemory:
         self._cosmos_database = database or self._cosmos_database
         self._cosmos_container = container or self._cosmos_container
 
-        self._cosmos_store = CosmosMemoryStore(
+        self._cosmos_store = AsyncCosmosMemoryStore(
             endpoint=self._cosmos_endpoint,
             credential=self._cosmos_credential,
             database=self._cosmos_database,
             container=self._cosmos_container,
         )
-        self._cosmos_store.create_store(
+        await self._cosmos_store.create_store(
             embedding_dimensions=embedding_dimensions or self._embedding_dimensions or 1536,
             embedding_data_type=embedding_data_type or "float32",
             distance_function=distance_function or "cosine",
@@ -298,10 +309,10 @@ class AgentMemory:
         self._cosmos_store._require_connected()
 
     # ------------------------------------------------------------------
-    # Cosmos DB operations
+    # Cosmos DB operations (async)
     # ------------------------------------------------------------------
 
-    def add_cosmos(
+    async def add_cosmos(
         self,
         user_id: str,
         role: str,
@@ -322,21 +333,27 @@ class AgentMemory:
         if thread_id is not None:
             kwargs["thread_id"] = thread_id
         record = MemoryRecord(**kwargs)
-        self._cosmos_store.upsert(record)
+        await self._cosmos_store.upsert(record)
         logger.info("add_cosmos id=%s role=%s type=%s", record.id, role, memory_type)
 
-    def push_to_cosmos(self) -> None:
-        """Insert all local memories into Cosmos DB.
+    async def push_to_cosmos(self, batch_size: int = 25) -> None:
+        """Insert all local memories into Cosmos DB in concurrent batches.
 
         Each local memory is inserted as-is, preserving its existing
         ``id``, ``thread_id``, timestamps, and metadata.
         """
         self._require_cosmos()
-        logger.info("push_to_cosmos count=%d", len(self.local_memory))
+        if batch_size <= 0:
+            raise ValueError("batch_size must be greater than 0")
+        logger.info(
+            "push_to_cosmos count=%d batch_size=%d",
+            len(self.local_memory),
+            batch_size,
+        )
         records = [MemoryRecord.from_cosmos_dict(dict(m)) for m in self.local_memory]
-        self._cosmos_store.upsert_batch(records)
+        await self._cosmos_store.upsert_batch(records, batch_size=batch_size)
 
-    def get_memories(
+    async def get_memories(
         self,
         memory_id: Optional[str] = None,
         user_id: Optional[str] = None,
@@ -345,23 +362,13 @@ class AgentMemory:
         memory_type: Optional[str] = None,
         recent_k: Optional[int] = None,
     ) -> list[dict[str, Any]]:
-        """Retrieve memories from Cosmos DB with optional filters.
-
-        Args:
-            memory_id: Filter by memory id.
-            user_id: Filter by user id.
-            thread_id: Filter by thread id.
-            role: Filter by role.
-            memory_type: Filter by type (raw, summary, fact, etc.).
-            recent_k: If specified, return only the *k* most recent documents
-                (ordered by ``_ts`` descending, then reversed to chronological).
-        """
+        """Retrieve memories from Cosmos DB with optional filters."""
         self._require_cosmos()
         logger.debug(
             "get_memories filters: memory_id=%s user_id=%s thread_id=%s role=%s type=%s recent_k=%s",
             memory_id, user_id, thread_id, role, memory_type, recent_k,
         )
-        results = self._cosmos_store.get_memories(
+        results = await self._cosmos_store.get_memories(
             memory_id=memory_id,
             user_id=user_id,
             thread_id=thread_id,
@@ -373,7 +380,7 @@ class AgentMemory:
             logger.warning("get_memories returned empty results")
         return results
 
-    def update_cosmos(
+    async def update_cosmos(
         self,
         memory_id: str,
         content: Optional[str] = None,
@@ -383,7 +390,7 @@ class AgentMemory:
     ) -> None:
         """Update a memory in Cosmos DB."""
         self._require_cosmos()
-        self._cosmos_store.update(
+        await self._cosmos_store.update(
             memory_id=memory_id,
             content=content,
             role=role,
@@ -391,16 +398,16 @@ class AgentMemory:
             metadata=metadata,
         )
 
-    def delete_cosmos(self, memory_id: str, thread_id: str, user_id: str) -> None:
+    async def delete_cosmos(self, memory_id: str, thread_id: str, user_id: str) -> None:
         """Delete a memory from Cosmos DB."""
         self._require_cosmos()
-        self._cosmos_store.delete(
+        await self._cosmos_store.delete(
             memory_id=memory_id,
             user_id=user_id,
             thread_id=thread_id,
         )
 
-    def search_cosmos(
+    async def search_cosmos(
         self,
         search_terms: str,
         memory_id: Optional[str] = None,
@@ -429,8 +436,8 @@ class AgentMemory:
             "search_cosmos search_terms=%s",
             search_terms[:50] + "..." if len(search_terms) > 50 else search_terms,
         )
-        query_vector = self._embeddings_client.generate(search_terms)
-        results = self._cosmos_store.vector_search(
+        query_vector = await self._embeddings_client.generate(search_terms)
+        results = await self._cosmos_store.vector_search(
             query_vector=query_vector,
             user_id=user_id,
             role=role,
@@ -450,7 +457,7 @@ class AgentMemory:
             )
         return results
 
-    def get_thread(
+    async def get_thread(
         self,
         thread_id: str,
         user_id: Optional[str] = None,
@@ -462,23 +469,23 @@ class AgentMemory:
         Returns memories sorted in chronological order (oldest first).
         """
         self._require_cosmos()
-        return self._cosmos_store.get_thread(
+        return await self._cosmos_store.get_thread(
             thread_id=thread_id,
             user_id=user_id,
             memory_type=memory_type,
             recent_k=recent_k,
         )
 
-    def get_user_summary(self, user_id: str) -> list[dict[str, Any]]:
+    async def get_user_summary(self, user_id: str) -> list[dict[str, Any]]:
         """Retrieve user summary documents from Cosmos DB, newest first."""
         self._require_cosmos()
-        return self._cosmos_store.get_user_summary(user_id=user_id)
+        return await self._cosmos_store.get_user_summary(user_id=user_id)
 
     # ------------------------------------------------------------------
-    # Processing (Azure Durable Functions)
+    # Processing (Azure Durable Functions, async)
     # ------------------------------------------------------------------
 
-    def generate_thread_summary(
+    async def generate_thread_summary(
         self,
         user_id: str,
         thread_id: str,
@@ -486,13 +493,13 @@ class AgentMemory:
         poll_interval: float = 2.0,
         timeout: float = 120.0,
     ) -> dict[str, Any]:
-        """Trigger the Azure Durable Function to generate a thread summary."""
+        """Trigger the Azure Durable Function to generate a thread summary (async)."""
         logger.info(
             "generate_thread_summary started user_id=%s thread_id=%s",
             user_id,
             thread_id,
         )
-        return self._processing_client.generate_thread_summary(
+        return await self._processing_client.generate_thread_summary(
             user_id=user_id,
             thread_id=thread_id,
             recent_k=recent_k,
@@ -500,7 +507,7 @@ class AgentMemory:
             timeout=timeout,
         )
 
-    def extract_facts(
+    async def extract_facts(
         self,
         user_id: str,
         thread_id: str,
@@ -508,13 +515,13 @@ class AgentMemory:
         poll_interval: float = 2.0,
         timeout: float = 120.0,
     ) -> dict[str, Any]:
-        """Trigger the Azure Durable Function to extract facts from a thread."""
+        """Trigger the Azure Durable Function to extract facts (async)."""
         logger.info(
             "extract_facts started user_id=%s thread_id=%s",
             user_id,
             thread_id,
         )
-        return self._processing_client.extract_facts(
+        return await self._processing_client.extract_facts(
             user_id=user_id,
             thread_id=thread_id,
             recent_k=recent_k,
@@ -522,7 +529,7 @@ class AgentMemory:
             timeout=timeout,
         )
 
-    def generate_user_summary(
+    async def generate_user_summary(
         self,
         user_id: str,
         thread_ids: Optional[list[str]] = None,
@@ -530,9 +537,9 @@ class AgentMemory:
         poll_interval: float = 2.0,
         timeout: float = 120.0,
     ) -> dict[str, Any]:
-        """Trigger the Azure Durable Function to generate a cross-thread user summary."""
+        """Trigger the Azure Durable Function to generate a cross-thread user summary (async)."""
         logger.info("generate_user_summary started user_id=%s", user_id)
-        return self._processing_client.generate_user_summary(
+        return await self._processing_client.generate_user_summary(
             user_id=user_id,
             thread_ids=thread_ids,
             recent_k=recent_k,
