@@ -1,4 +1,4 @@
-"""Unit tests for agent_memory_toolkit.llm.ChatClient."""
+"""Unit tests for agent_memory_toolkit.chat.ChatClient (sync)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from agent_memory_toolkit.chat import ChatClient
-from agent_memory_toolkit.exceptions import ConfigurationError, LLMError
+from agent_memory_toolkit.exceptions import ConfigurationError
 
 # ---------------------------------------------------------------------------
 # Initialization
@@ -77,7 +77,13 @@ def test_generate_returns_content():
     assert result == "Hello, world!"
 
 
-def test_generate_passes_temperature():
+def test_generate_forces_temperature_to_one():
+    """Temperature is hardcoded to 1.0; caller-supplied values are ignored.
+
+    Rationale: newer Azure OpenAI models (gpt-5.x, o-series) only accept
+    the default temperature value; older models accept 1.0 as a valid
+    value. Forcing 1.0 universally keeps behavior uniform and removes
+    the need for per-model sampling-knob carve-outs."""
     client = ChatClient(endpoint="https://test.openai.azure.com", api_key="test-key")
 
     mock_choice = MagicMock()
@@ -95,7 +101,7 @@ def test_generate_passes_temperature():
         temperature=0.5,
     )
     call_kwargs = mock_openai_client.chat.completions.create.call_args[1]
-    assert call_kwargs["temperature"] == 0.5
+    assert call_kwargs["temperature"] == 1.0
 
 
 def test_generate_passes_response_format():
@@ -171,7 +177,7 @@ def test_generate_exhausts_retries_on_rate_limit():
     mock_openai_client.chat.completions.create.side_effect = [rate_err] * 3
     client._client = mock_openai_client
 
-    with pytest.raises(LLMError, match="rate-limited"):
+    with pytest.raises(openai.RateLimitError, match="rate limited"):
         client.generate(
             [{"role": "user", "content": "test"}],
             max_retries=3,
@@ -184,14 +190,14 @@ def test_generate_exhausts_retries_on_rate_limit():
 # ---------------------------------------------------------------------------
 
 
-def test_generate_raises_llm_error_on_generic_exception():
+def test_generate_propagates_generic_exception():
     client = ChatClient(endpoint="https://test.openai.azure.com", api_key="test-key")
 
     mock_openai_client = MagicMock()
     mock_openai_client.chat.completions.create.side_effect = RuntimeError("boom")
     client._client = mock_openai_client
 
-    with pytest.raises(LLMError, match="boom"):
+    with pytest.raises(RuntimeError, match="boom"):
         client.generate([{"role": "user", "content": "test"}])
 
 
@@ -205,18 +211,19 @@ def test_build_kwargs_minimal():
     kwargs = client._build_kwargs([{"role": "user", "content": "hi"}])
     assert kwargs["model"] == "gpt-4o-mini"
     assert kwargs["messages"] == [{"role": "user", "content": "hi"}]
-    assert "temperature" not in kwargs
+    assert kwargs["temperature"] == 1.0
     assert "response_format" not in kwargs
 
 
 def test_build_kwargs_with_all_options():
+    """Temperature is always forced to 1.0; other options pass through."""
     client = ChatClient(endpoint="https://test.openai.azure.com", api_key="key")
     kwargs = client._build_kwargs(
         [{"role": "user", "content": "hi"}],
         temperature=0.7,
         response_format={"type": "json_object"},
     )
-    assert kwargs["temperature"] == 0.7
+    assert kwargs["temperature"] == 1.0
     assert kwargs["response_format"] == {"type": "json_object"}
 
 
@@ -225,96 +232,12 @@ def test_build_kwargs_with_all_options():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_close_clears_async_client():
-    from unittest.mock import AsyncMock
-
+def test_close_clears_sync_client():
     client = ChatClient(endpoint="https://test.openai.azure.com", api_key="key")
-    mock_async = MagicMock()
-    mock_async.close = AsyncMock()
-    client._async_client = mock_async
+    mock_client = MagicMock()
+    client._client = mock_client
 
-    await client.close()
-    assert client._async_client is None
+    client.close()
 
-
-# ---------------------------------------------------------------------------
-# Async-credential detection / sync-credential adapter
-# ---------------------------------------------------------------------------
-
-
-def test_is_async_credential_detects_sync():
-    from agent_memory_toolkit.chat import _is_async_credential
-
-    class SyncCred:
-        def get_token(self, scope):  # not a coroutine function
-            return MagicMock(token="t")
-
-    assert _is_async_credential(SyncCred()) is False
-
-
-def test_is_async_credential_detects_async():
-    from agent_memory_toolkit.chat import _is_async_credential
-
-    class AsyncCred:
-        async def get_token(self, scope):  # coroutine function
-            return MagicMock(token="t")
-
-    assert _is_async_credential(AsyncCred()) is True
-
-
-@pytest.mark.asyncio
-async def test_sync_credential_token_provider_offloads_to_thread():
-    from agent_memory_toolkit.chat import _make_sync_token_provider_for_async
-
-    class SyncCred:
-        def __init__(self):
-            self.calls = 0
-
-        def get_token(self, scope):
-            self.calls += 1
-            return MagicMock(token=f"token-for-{scope}")
-
-    cred = SyncCred()
-    provider = _make_sync_token_provider_for_async(cred, "scope-x")
-    token = await provider()
-    assert token == "token-for-scope-x"
-    assert cred.calls == 1
-
-
-@pytest.mark.asyncio
-async def test_ensure_async_client_accepts_sync_credential(monkeypatch):
-    """Regression: passing a sync ``DefaultAzureCredential`` must not raise.
-
-    Previously ``_ensure_async_client`` always wrapped the credential with
-    ``azure.identity.aio.get_bearer_token_provider`` which expects an async
-    credential and would fail at runtime when a sync one was supplied.
-    """
-
-    class SyncCred:
-        def get_token(self, scope):
-            return MagicMock(token="tok")
-
-    captured = {}
-
-    class FakeAsyncAzureOpenAI:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-    import sys
-
-    fake_openai = MagicMock()
-    fake_openai.AsyncAzureOpenAI = FakeAsyncAzureOpenAI
-    monkeypatch.setitem(sys.modules, "openai", fake_openai)
-
-    client = ChatClient(
-        endpoint="https://test.openai.azure.com",
-        credential=SyncCred(),
-    )
-    result = client._ensure_async_client()
-
-    assert result is client._async_client
-    assert "azure_ad_token_provider" in captured
-    # The provider must be an async callable that returns the token string.
-    token = await captured["azure_ad_token_provider"]()
-    assert token == "tok"
+    assert client._client is None
+    mock_client.close.assert_called_once()

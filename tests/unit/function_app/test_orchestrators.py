@@ -40,6 +40,7 @@ def _make_context(payload):
     ctx.get_input.return_value = payload
 
     yielded_calls: list[tuple] = []
+    yielded_sub_orchestrators: list[tuple] = []
 
     def call_activity_with_retry(name, retry, activity_payload):
         yielded_calls.append((name, retry, activity_payload))
@@ -47,8 +48,14 @@ def _make_context(payload):
         # this and feeds the next pre-canned activity result back in.
         return ("__call__", name, activity_payload)
 
+    def call_sub_orchestrator_with_retry(name, retry, sub_payload, *_args, **_kwargs):
+        yielded_sub_orchestrators.append((name, retry, sub_payload))
+        return ("__sub__", name, sub_payload)
+
     ctx.call_activity_with_retry.side_effect = call_activity_with_retry
+    ctx.call_sub_orchestrator_with_retry.side_effect = call_sub_orchestrator_with_retry
     ctx._yielded_calls = yielded_calls
+    ctx._yielded_sub_orchestrators = yielded_sub_orchestrators
     return ctx
 
 
@@ -98,13 +105,13 @@ class TestThreadSummaryOrchestrator:
         result, _ = _drive(
             gen,
             [
-                {"id": "sum-123"},  # ts_SummarizeThread
+                {"id": "sum-123"},  # ts_Extract
                 {"id": "sum-123", "persisted": True},  # ts_PersistSummary
             ],
         )
 
         assert [c[0] for c in ctx._yielded_calls] == [
-            "ts_SummarizeThread",
+            "ts_Extract",
             "ts_PersistSummary",
         ]
         assert result == {"persisted": True, "summary_id": "sum-123"}
@@ -132,7 +139,7 @@ class TestThreadSummaryOrchestrator:
     def test_summary_id_returned(self, _retry):
         ctx = _make_context({"user_id": "u", "thread_id": "t"})
         gen = self._orchestrator()(ctx)
-        result, _ = _drive(gen, [{"id": "s1"}, {}])
+        result, _ = _drive(gen, [{"id": "s1"}, {"id": "s1"}])
 
         assert result["summary_id"] == "s1"
         assert result["persisted"] is True
@@ -185,18 +192,18 @@ class TestExtractMemoriesOrchestrator:
         result, _ = _drive(
             gen,
             [
+                {"facts": [{"id": "f1"}], "episodic": [], "updates": []},
                 {
-                    "facts_count": 2,
-                    "procedural_count": 1,
+                    "fact_count": 2,
                     "episodic_count": 0,
                     "updated_count": 0,
                 },
             ],
         )
 
-        assert [c[0] for c in ctx._yielded_calls] == ["em_ExtractMemories"]
+        assert [c[0] for c in ctx._yielded_calls] == ["em_Extract", "em_Persist"]
         assert result["persisted"] is True
-        assert result["extracted"]["facts_count"] == 2
+        assert result["extracted"]["fact_count"] == 2
         assert result["reconciled"] is None
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
@@ -206,21 +213,76 @@ class TestExtractMemoriesOrchestrator:
         result, _ = _drive(
             gen,
             [
-                {"facts_count": 2, "procedural_count": 0, "episodic_count": 0, "updated_count": 0},
+                {"facts": [{"id": "f1"}], "episodic": [], "updates": []},
+                {"fact_count": 2, "episodic_count": 0, "updated_count": 0},
                 {"kept": 0, "merged": 1, "contradicted": 0},
+                {"status": "synthesized", "version": 3},
             ],
         )
 
         names = [c[0] for c in ctx._yielded_calls]
-        assert names == ["em_ExtractMemories", "em_ReconcileMemories"]
-        assert ctx._yielded_calls[1][2] == {"user_id": "u1"}
+        assert names == ["em_Extract", "em_Persist", "em_ReconcileMemories"]
+        assert ctx._yielded_calls[2][2] == {"user_id": "u1"}
+        assert [s[0] for s in ctx._yielded_sub_orchestrators] == [
+            "SynthesizeProceduralOrchestrator",
+        ]
+        assert ctx._yielded_sub_orchestrators[0][2] == {"user_id": "u1", "force": False}
         assert result["reconciled"] == {"kept": 0, "merged": 1, "contradicted": 0}
+        assert result["procedural"] == {"status": "synthesized", "version": 3}
+
+    @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
+    def test_procedural_failure_is_swallowed(self, _retry):
+        """Procedural synthesis is best-effort; failure must not fail the orchestrator."""
+        ctx = _make_context({"user_id": "u1", "thread_id": "t1", "reconcile": True})
+
+        def boom_after_sub(name, retry, sub_payload, *args, **kwargs):
+            ctx._yielded_sub_orchestrators.append((name, retry, sub_payload))
+            return ("__sub_boom__", name, sub_payload)
+
+        ctx.call_sub_orchestrator_with_retry.side_effect = boom_after_sub
+        # We'll send activity results normally for the first 3 yields, then throw
+        # an exception into the 4th yield (the sub-orchestrator call).
+        gen = self._orchestrator()(ctx)
+        # Yield 1: em_Extract
+        gen.send(None)
+        # Yield 2: em_Persist
+        gen.send({"facts": [{"id": "f1"}], "episodic": [], "updates": []})
+        # Yield 3: em_ReconcileMemories
+        gen.send({"fact_count": 2, "episodic_count": 0, "updated_count": 0})
+        # Yield 4: SynthesizeProceduralOrchestrator — throw an exception
+        gen.send({"kept": 0, "merged": 1, "contradicted": 0})
+        try:
+            gen.throw(RuntimeError("procedural blew up"))
+        except StopIteration as stop:
+            result = stop.value
+        else:
+            pytest.fail("orchestrator did not return after procedural exception")
+
+        assert result["persisted"] is True
+        assert result["reconciled"] == {"kept": 0, "merged": 1, "contradicted": 0}
+        assert result["procedural"] is None
+
+    @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
+    def test_procedural_not_called_when_reconcile_skipped(self, _retry):
+        ctx = _make_context({"user_id": "u1", "thread_id": "t1"})
+        gen = self._orchestrator()(ctx)
+        result, _ = _drive(
+            gen,
+            [
+                {"facts": [], "episodic": [], "updates": []},
+                {"fact_count": 0, "episodic_count": 0, "updated_count": 0},
+            ],
+        )
+
+        assert [c[0] for c in ctx._yielded_calls] == ["em_Extract", "em_Persist"]
+        assert ctx._yielded_sub_orchestrators == []
+        assert result["procedural"] is None
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
     def test_extract_payload_carries_user_thread_and_limit(self, _retry):
         ctx = _make_context({"user_id": "u", "thread_id": "t"})
         gen = self._orchestrator()(ctx)
-        _drive(gen, [{"facts": 5}])
+        _drive(gen, [{"facts": []}, {"fact_count": 0}])
 
         extract_payload = ctx._yielded_calls[0][2]
         assert extract_payload == {"user_id": "u", "thread_id": "t", "limit": 20}
@@ -257,12 +319,12 @@ class TestUserSummaryOrchestrator:
         result, _ = _drive(
             gen,
             [
-                {"id": "user-sum-1"},  # us_GenerateUserSummary
+                {"id": "user-sum-1"},  # us_Extract
                 {"id": "user-sum-1", "persisted": True},  # us_PersistUserSummary
             ],
         )
         assert [c[0] for c in ctx._yielded_calls] == [
-            "us_GenerateUserSummary",
+            "us_Extract",
             "us_PersistUserSummary",
         ]
         assert result == {
@@ -301,7 +363,7 @@ class TestUserSummaryOrchestrator:
     def test_user_summary_id_returned(self, _retry):
         ctx = _make_context({"user_id": "u"})
         gen = self._orchestrator()(ctx)
-        result, _ = _drive(gen, [{"id": "us"}, {}])
+        result, _ = _drive(gen, [{"id": "us"}, {"id": "us"}])
         assert result["user_summary_id"] == "us"
         assert result["persisted"] is True
 

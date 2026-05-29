@@ -1,8 +1,8 @@
 """Unit tests for ``function_app/shared/pipeline_factory.py``.
 
-The factory lazily constructs a ``ProcessingPipeline`` from environment
-variables. We mock ``DefaultAzureCredential``, the Cosmos container helper,
-and the SDK clients so no Azure resource is touched.
+The factory lazily constructs a ``PipelineService`` from environment variables.
+We mock ``DefaultAzureCredential``, the Cosmos container helper, and the SDK
+clients so no Azure resource is touched.
 """
 
 from __future__ import annotations
@@ -36,34 +36,42 @@ def mocks(monkeypatch):
     Returns a namespace exposing each MagicMock so tests can assert on calls.
     """
     container = MagicMock(name="ContainerProxy")
+    turns_container = MagicMock(name="TurnsContainerProxy")
     credential = MagicMock(name="DefaultAzureCredential")
     chat_instance = MagicMock(name="ChatClient_instance")
     embed_instance = MagicMock(name="EmbeddingsClient_instance")
-    pipeline_instance = MagicMock(name="ProcessingPipeline_instance")
+    store_instance = MagicMock(name="MemoryStore_instance")
+    pipeline_instance = MagicMock(name="PipelineService_instance")
 
     chat_ctor = MagicMock(name="ChatClient_ctor", return_value=chat_instance)
     embed_ctor = MagicMock(name="EmbeddingsClient_ctor", return_value=embed_instance)
-    pipeline_ctor = MagicMock(name="ProcessingPipeline_ctor", return_value=pipeline_instance)
+    store_ctor = MagicMock(name="MemoryStore_ctor", return_value=store_instance)
+    pipeline_ctor = MagicMock(name="PipelineService_ctor", return_value=pipeline_instance)
     credential_ctor = MagicMock(name="DefaultAzureCredential_ctor", return_value=credential)
 
     monkeypatch.setattr(pipeline_factory, "get_memories_container", lambda: container)
+    monkeypatch.setattr(pipeline_factory, "get_turns_container", lambda: turns_container)
 
     patches = [
         patch("azure.identity.DefaultAzureCredential", credential_ctor),
         patch("agent_memory_toolkit.chat.ChatClient", chat_ctor),
         patch("agent_memory_toolkit.embeddings.EmbeddingsClient", embed_ctor),
-        patch("agent_memory_toolkit.pipeline.ProcessingPipeline", pipeline_ctor),
+        patch("agent_memory_toolkit.store.MemoryStore", store_ctor),
+        patch("agent_memory_toolkit.services.pipeline.PipelineService", pipeline_ctor),
     ]
     for p in patches:
         p.start()
     yield MagicMock(
         container=container,
+        turns_container=turns_container,
         credential=credential,
         credential_ctor=credential_ctor,
         chat_ctor=chat_ctor,
         chat_instance=chat_instance,
         embed_ctor=embed_ctor,
         embed_instance=embed_instance,
+        store_ctor=store_ctor,
+        store_instance=store_instance,
         pipeline_ctor=pipeline_ctor,
         pipeline_instance=pipeline_instance,
     )
@@ -80,10 +88,16 @@ def test_builds_pipeline_from_complete_env(mocks):
     result = pipeline_factory.get_pipeline()
 
     assert result is mocks.pipeline_instance
-    mocks.pipeline_ctor.assert_called_once_with(
+    mocks.store_ctor.assert_called_once_with(
         mocks.container,
+        embeddings_client=mocks.embed_instance,
+        turns_container=mocks.turns_container,
+    )
+    mocks.pipeline_ctor.assert_called_once_with(
+        mocks.store_instance,
         mocks.chat_instance,
         mocks.embed_instance,
+        cosmos_turns_container=mocks.turns_container,
     )
 
 

@@ -68,9 +68,7 @@ cp .env.template .env
 # edit COSMOS_DB_ENDPOINT, AI_FOUNDRY_ENDPOINT, AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME, AI_FOUNDRY_CHAT_DEPLOYMENT_NAME
 ```
 
-You can also point `azd up` at existing resources via `azd env set USE_EXISTING_COSMOS true` / `USE_EXISTING_AI_FOUNDRY true` (full BYOR flag list in `infra/README.md`).
-
-> For the Durable Function app counter-trigger settings, Bicep module reference, and RBAC scopes — see **[`infra/README.md`](infra/README.md)**.
+> For the Durable Function app counter-trigger settings, Bicep module reference, RBAC scopes, and the SDK-only escape hatch (`DEPLOY_FUNCTION_APP=false`) — see **[`infra/README.md`](infra/README.md)**.
 
 ### 3. Use the SDK
 
@@ -170,14 +168,14 @@ high_conf_facts = memory.get_memories(user_id="u1", memory_types=["fact"], min_c
 
 ### Memory Reconciliation
 
-`reconcile(user_id, n=50)` (on the public client; underlying pipeline method is `ProcessingPipeline.reconcile_memories`) collapses paraphrased duplicates and resolves semantic contradictions in a single LLM pass over the N most-recent active facts. Both outcomes soft-delete the loser with a `supersede_reason` of `"duplicate"` or `"contradiction"`. See [Docs/concepts.md](Docs/concepts.md#memory-reconciliation) for details.
+`reconcile(user_id, n=50)` (on the public client; underlying pipeline method is `ProcessingPipeline.reconcile_memories`) collapses paraphrased duplicates and resolves semantic contradictions in a single LLM pass over the N most-recent active facts. Both outcomes soft-delete the loser with a `supersede_reason` of `"duplicate"` or `"contradict"`. See [Docs/concepts.md](Docs/concepts.md#memory-reconciliation) for details.
 
 > **Cost note.** Each reconciliation makes one LLM call covering up to `n` facts (default 50, hard cap 500). With auto-trigger, this fires every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns per user, with `n` taken from `DEDUP_POOL_SIZE`. The previous cosine-cluster pre-filter was removed deliberately — it could not catch semantic contradictions like "vegetarian" vs "ribeye steak" — so the LLM is now invoked whenever there are ≥ 2 active facts. To bound LLM cost more tightly: raise `DEDUP_EVERY_N` (lower frequency — reconcile fires every Nth extraction, so a *higher* N means *less often*), lower `DEDUP_POOL_SIZE` (smaller per-call pool), or override `n` per call when invoking `reconcile()` directly.
 
 | New `MemoryRecord` field | Meaning |
 |---|---|
 | `content_hash` | SHA-256 of normalized content; enables write-time exact-dedup short-circuit |
-| `supersede_reason` | `"duplicate"` or `"contradiction"` (None for live records) |
+| `supersede_reason` | `"duplicate"` or `"contradict"` (None for live records) |
 | `superseded_at` | ISO timestamp when the supersede happened (None for live records) |
 | `superseded_by` | Id of the record that replaced this one (existing field) |
 
@@ -282,7 +280,7 @@ Async equivalents (`AsyncInProcessProcessor`, `AsyncDurableFunctionProcessor`) l
 - **[Docs/design_patterns.md](Docs/design_patterns.md)** — Integration patterns for chat apps and multi-agent systems
 - **[Docs/local_testing.md](Docs/local_testing.md)** — Prerequisites, environment setup, running locally, debugging
 - **[Docs/azure_testing.md](Docs/azure_testing.md)** — Azure deployment, RBAC, cloud validation
-- **[infra/README.md](infra/README.md)** — `azd` deployment, Bicep modules, BYOR settings, counter-trigger tuning
+- **[infra/README.md](infra/README.md)** — `azd` deployment, Bicep modules, RBAC, counter-trigger tuning, SDK-only mode
 - **[Docs/troubleshooting.md](Docs/troubleshooting.md)** — Common issues and resolutions for setup, auth, Cosmos DB, embeddings, Durable Functions, vector search, change feed, etc.
 
 ---

@@ -20,7 +20,7 @@ class ProcessThreadResult:
 
     ``extracted_counts`` carries the per-type extraction telemetry returned by
     :meth:`ProcessingPipeline.extract_memories` (e.g.
-    ``{"facts_count": 2, "procedural_count": 1, "episodic_count": 0, "updated_count": 0}``).
+    ``{"fact_count": 2, "episodic_count": 0, "updated_count": 0}``).
     The actual extracted memory documents are persisted to Cosmos DB by the
     pipeline; query them back via the SDK's ``get_memories`` if you need the
     raw docs.
@@ -98,6 +98,13 @@ class MemoryProcessor(Protocol):
         user_id: str,
         thread_summaries: list[dict[str, Any]],
     ) -> UserSummaryResult: ...
+
+    def synthesize_procedural(
+        self,
+        *,
+        user_id: str,
+        force: bool = False,
+    ) -> dict[str, Any]: ...
 
     def close(self) -> None: ...
 

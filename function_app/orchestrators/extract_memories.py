@@ -1,18 +1,15 @@
 """Memory-extraction orchestrator + activities.
 
-Chain: ``ExtractMemories`` followed by an optional ``ReconcileMemories``
-activity. Reconciliation is gated by the change-feed trigger (which
-tracks the per-user/thread turn counter) and signaled to the
-orchestrator via the ``reconcile`` flag on its input payload. This
-matches the SDK auto-trigger contract: extract every
-``FACT_EXTRACTION_EVERY_N`` turns; reconcile every
-``FACT_EXTRACTION_EVERY_N * DEDUP_EVERY_N`` turns.
-
-The pipeline writes memories to Cosmos DB during ``ExtractMemories``; the
-Function App does not delete or tombstone any memories on its own. Memories
-are removed only via explicit user-driven SDK calls (``forget_memory`` /
-``delete_memories``). Salience is preserved on each document for use as a
-ranking signal at retrieval time, not as an automatic-deletion threshold.
+Chain: ``Extract`` → ``Persist`` followed by an optional ``ReconcileMemories``
+activity, then a best-effort ``SynthesizeProceduralOrchestrator`` sub-call.
+Reconciliation is gated by the change-feed trigger (which tracks the
+per-user/thread turn counter) and signaled to the orchestrator via the
+``reconcile`` flag on its input payload. Procedural synthesis fires only
+after reconcile and only when ``PROCEDURAL_SYNTHESIS_AUTO`` is enabled, so
+operators have a kill-switch for the extra LLM call. The prompt is always
+derived from the deduped fact pool. Redundant concurrent runs across threads
+are cheap because the pipeline short-circuits with ``status="unchanged"``
+when the source fact/episodic IDs have not moved.
 """
 
 from __future__ import annotations
@@ -30,81 +27,100 @@ logger = logging.getLogger(__name__)
 bp = df.Blueprint()
 
 
-# ---------------------------------------------------------------------------
-# Orchestrator
-# ---------------------------------------------------------------------------
-
-
 @bp.orchestration_trigger(context_name="context")
 def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
     payload = context.get_input() or {}
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
     should_reconcile = bool(payload.get("reconcile", False))
-    max_batch = config.get_max_batch_size()
-
     retry = default_retry_options()
 
     extracted = yield context.call_activity_with_retry(
-        "em_ExtractMemories",
+        "em_Extract",
         retry,
-        {"user_id": user_id, "thread_id": thread_id, "limit": max_batch},
+        {"user_id": user_id, "thread_id": thread_id, "limit": config.get_max_batch_size()},
+    )
+    persisted = yield context.call_activity_with_retry(
+        "em_Persist",
+        retry,
+        {"user_id": user_id, "extracted": extracted},
     )
 
     reconciled = None
+    procedural = None
     if should_reconcile:
         reconciled = yield context.call_activity_with_retry(
             "em_ReconcileMemories",
             retry,
             {"user_id": user_id},
         )
+        if config.get_procedural_synthesis_auto():
+            count = payload.get("count")
+            instance_id = (
+                f"procedural:{user_id}:{thread_id}:{count}" if count is not None else None
+            )
+            try:
+                procedural = yield context.call_sub_orchestrator_with_retry(
+                    "SynthesizeProceduralOrchestrator",
+                    retry,
+                    {"user_id": user_id, "force": False},
+                    instance_id=instance_id,
+                )
+            except Exception as exc:
+                if not context.is_replaying:
+                    logger.warning(
+                        "SynthesizeProceduralOrchestrator failed user=%s thread=%s: %s",
+                        user_id,
+                        thread_id,
+                        exc,
+                    )
 
     return {
         "persisted": True,
-        "extracted": extracted,
+        "extracted": persisted,
         "reconciled": reconciled,
+        "procedural": procedural,
     }
 
 
-# ---------------------------------------------------------------------------
-# Activities
-# ---------------------------------------------------------------------------
-
-
 @bp.activity_trigger(input_name="payload")
-def em_ExtractMemories(payload: dict) -> dict:
-    """Run the LLM extraction step.
-
-    Returns the per-type counts produced by ``pipeline.extract_memories``,
-    shaped like
-    ``{"facts_count": N, "procedural_count": N, "episodic_count": N, "updated_count": N}``.
-    Salience-based filtering is delegated to the pipeline since it owns the
-    schema.
-
-    The pipeline loads recent turns internally, so we do NOT pre-load them in
-    a separate activity (which would duplicate the query, waste RUs, and open
-    a TOCTOU window between the load and the LLM call).
-    """
+def em_Extract(payload: dict) -> dict:
+    """Load recent turns and run LLM extraction without embeddings or writes."""
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
     limit = payload.get("limit")
-    pipeline = get_pipeline()
-    counts = pipeline.extract_memories(
+    extracted = get_pipeline().extract_memories_dry(
         user_id=user_id,
         thread_id=thread_id,
         recent_k=limit,
     )
     logger.info(
-        "ExtractMemories user=%s thread=%s counts=%s",
+        "ExtractMemories extracted user=%s thread=%s facts=%d episodic=%d updates=%d",
         user_id,
         thread_id,
-        counts,
+        len(extracted.get("facts", [])),
+        len(extracted.get("episodic", [])),
+        len(extracted.get("updates", [])),
     )
+    return extracted
+
+
+@bp.activity_trigger(input_name="payload")
+def em_Persist(payload: dict) -> dict:
+    """Persist extracted docs with embeddings and deterministic create semantics."""
+    user_id = payload["user_id"]
+    counts = get_pipeline().persist_extracted_memories(
+        user_id=user_id,
+        extracted=payload["extracted"],
+    )
+    logger.info("ExtractMemories persisted user=%s counts=%s", user_id, counts)
     return counts or {}
 
 
 @bp.activity_trigger(input_name="payload")
 def em_ReconcileMemories(payload: dict) -> dict:
+    # GA keeps reconcile single-activity: its LLM dedup decisions and supersession
+    # operations are larger/more coupled than the extract→persist split handled here.
     user_id = payload["user_id"]
     pipeline = get_pipeline()
     from agent_memory_toolkit.thresholds import get_dedup_pool_size

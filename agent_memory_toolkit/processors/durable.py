@@ -8,12 +8,13 @@ all ``process_*`` calls into debug-logged no-ops.
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Optional
+
+from agent_memory_toolkit.logging import get_logger
 
 from .base import ProcessThreadResult, UserSummaryResult
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class DurableFunctionProcessor:
@@ -97,6 +98,18 @@ class DurableFunctionProcessor:
             len(thread_summaries) if thread_summaries else 0,
         )
         return UserSummaryResult(summary=None)
+
+    def synthesize_procedural(
+        self,
+        *,
+        user_id: str,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        raise NotImplementedError(
+            "Procedural synthesis runs automatically after reconcile in durable mode; "
+            "manual invocation via the SDK is not supported when the Durable Function "
+            "app is the active processor."
+        )
 
     def close(self) -> None:
         logger.debug("DurableFunctionProcessor.close no-op")

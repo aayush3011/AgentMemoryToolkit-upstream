@@ -15,30 +15,59 @@ from typing import Any, Optional
 
 from ._query_builder import _QueryBuilder
 from .exceptions import ConfigurationError, ValidationError
-
-# ---------------------------------------------------------------------------
-# Validation constants
-# ---------------------------------------------------------------------------
+from .thresholds import DEFAULT_TTL_BY_TYPE as DEFAULT_TTL_BY_TYPE
+from .thresholds import default_ttl_for
 
 VALID_ROLES = {"agent", "user", "tool", "system"}
 VALID_TYPES = {"turn", "summary", "fact", "user_summary", "procedural", "episodic"}
 
-DEFAULT_TTL_BY_TYPE: dict[str, int | None] = {
-    "turn": 2_592_000,  # 30 days
-    "summary": None,
-    "fact": None,
-    "user_summary": None,
-    "procedural": None,
-    "episodic": 7_776_000,  # 90 days
-}
+
+def new_id(memory_type: str) -> str:
+    """Return a fresh, type-prefixed UUID-backed memory id."""
+    prefix_map = {
+        "fact": "fact_",
+        "episodic": "ep_",
+        "procedural": "proc_",
+        "summary": "summary_",
+        "user_summary": "user_summary_",
+    }
+    prefix = prefix_map.get(memory_type, "")
+    return f"{prefix}{uuid.uuid4()}"
 
 
-# ---------------------------------------------------------------------------
-# Content hashing
-# ---------------------------------------------------------------------------
+def new_fact_id() -> str:
+    """Return a fresh ``fact_*`` id."""
+    return new_id("fact")
+
+
+def new_episodic_id() -> str:
+    """Return a fresh ``ep_*`` id."""
+    return new_id("episodic")
+
+
+def new_procedural_id() -> str:
+    """Return a fresh ``proc_*`` id."""
+    return new_id("procedural")
+
+
+def new_summary_id() -> str:
+    """Return a fresh ``summary_*`` id."""
+    return new_id("summary")
+
+
+def new_user_summary_id() -> str:
+    """Return a fresh ``user_summary_*`` id."""
+    return new_id("user_summary")
 
 
 _WHITESPACE_RE = re.compile(r"\s+")
+
+
+def _coerce_datetime_iso(value: Optional[str | datetime]) -> Optional[str]:
+    """Return ISO text for datetime values while leaving strings unchanged."""
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
 
 
 def _normalize_for_hash(text: str) -> str:
@@ -64,11 +93,6 @@ def compute_content_hash(content: str) -> str:
     return hashlib.sha256(_normalize_for_hash(content).encode("utf-8")).hexdigest()[:32]
 
 
-# ---------------------------------------------------------------------------
-# Memory factory
-# ---------------------------------------------------------------------------
-
-
 def _make_memory(
     user_id: str,
     role: str,
@@ -89,9 +113,8 @@ def _make_memory(
     if memory_type not in VALID_TYPES:
         raise ValidationError(f"type must be one of {VALID_TYPES}, got '{memory_type}'")
 
-    # Apply default TTL if caller didn't specify one
     if ttl is None:
-        ttl = DEFAULT_TTL_BY_TYPE.get(memory_type)
+        ttl = default_ttl_for(memory_type)
 
     memory: dict[str, Any] = {
         "id": memory_id or str(uuid.uuid4()),
@@ -284,11 +307,6 @@ def _build_container_kwargs(
     return kwargs
 
 
-# ---------------------------------------------------------------------------
-# Connection / query helpers (shared by sync & async Cosmos clients)
-# ---------------------------------------------------------------------------
-
-
 def _validate_connection(
     endpoint: str | None,
     credential: Any,
@@ -360,6 +378,18 @@ def _container_policies(
         ],
         "vectorIndexes": [{"path": "/embedding", "type": "diskANN"}],
         "fullTextIndexes": [{"path": "/content"}],
+        # Procedural synthesis selects TOP N by (salience DESC, created_at ASC, id ASC).
+        # Cosmos requires a composite index for multi-property ORDER BY; without it the
+        # query returns a non-deterministic 50 of N when many docs share the default
+        # salience (0.5), which makes the source-id short-circuit in synthesize_procedural
+        # thrash and burn LLM calls on every reconcile.
+        "compositeIndexes": [
+            [
+                {"path": "/salience", "order": "descending"},
+                {"path": "/created_at", "order": "ascending"},
+                {"path": "/id", "order": "ascending"},
+            ]
+        ],
     }
 
     full_text_policy = {

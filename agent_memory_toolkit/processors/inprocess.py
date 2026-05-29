@@ -1,22 +1,19 @@
-"""In-process :class:`MemoryProcessor` backed by :class:`ProcessingPipeline`."""
+"""In-process :class:`MemoryProcessor` backed by :class:`PipelineService`."""
 
 from __future__ import annotations
 
-import logging
 import time
 from typing import Any, Optional
 
 from .base import ProcessThreadResult, UserSummaryResult
-
-logger = logging.getLogger(__name__)
 
 
 class InProcessProcessor:
     """Runs the summarize → extract → dedup pipeline inline.
 
     This is the default backend. Wraps an existing
-    :class:`agent_memory_toolkit.pipeline.ProcessingPipeline` instance, or
-    constructs one from the supplied container / LLM / embeddings clients.
+    :class:`agent_memory_toolkit.services.pipeline.PipelineService` instance,
+    or constructs one from the supplied container / LLM / embeddings clients.
     """
 
     def __init__(
@@ -33,17 +30,13 @@ class InProcessProcessor:
                     "InProcessProcessor requires either a `pipeline` instance or "
                     "`cosmos_container`, `chat_client`, and `embeddings_client`."
                 )
-            from ..pipeline import ProcessingPipeline
+            from ..services.pipeline import PipelineService
+            from ..store import MemoryStore
 
-            pipeline = ProcessingPipeline(
-                cosmos_container=cosmos_container,
-                chat_client=chat_client,
-                embeddings_client=embeddings_client,
-            )
+            store = MemoryStore(cosmos_container, embeddings_client=embeddings_client)
+            pipeline = PipelineService(store, chat_client, embeddings_client)
 
         self._pipeline = pipeline
-
-    # -- MemoryProcessor protocol ------------------------------------------
 
     def process_thread(
         self,
@@ -155,6 +148,15 @@ class InProcessProcessor:
 
         summary = self._pipeline.generate_user_summary(user_id, thread_ids)
         return UserSummaryResult(summary=summary if isinstance(summary, dict) else None)
+
+    def synthesize_procedural(
+        self,
+        *,
+        user_id: str,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Run procedural prompt synthesis through the in-process pipeline."""
+        return self._pipeline.synthesize_procedural(user_id=user_id, force=force)
 
     def close(self) -> None:
         """No-op; the SDK owns the pipeline lifecycle."""

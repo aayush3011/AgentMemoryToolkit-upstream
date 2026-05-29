@@ -6,8 +6,10 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
+from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
-from agent_memory_toolkit.pipeline import ProcessingPipeline
+from agent_memory_toolkit.services.pipeline import PipelineService
+from agent_memory_toolkit.store import MemoryStore
 
 
 def _make_pipeline(llm_response: dict):
@@ -26,19 +28,20 @@ def _make_pipeline(llm_response: dict):
             }
         ]
     )
-    # Capture upserts for inspection.
+    # Capture writes from both upsert_item and create_item. The pipeline now
+    # uses create_item for facts/episodics/procedural (for 409 idempotency),
+    # so a fixture that only watches upsert_item would silently observe zero
+    # writes against a MagicMock container.
     upserted: list[dict] = []
     container.upsert_item.side_effect = lambda body: upserted.append(body) or body
+    container.create_item.side_effect = lambda body: upserted.append(body) or body
 
-    llm = MagicMock()
+    chat = MagicMock()
     embeddings = MagicMock()
     embeddings.generate_batch.side_effect = lambda texts: [[0.0] * 4 for _ in texts]
 
-    pipeline = ProcessingPipeline(
-        cosmos_container=container,
-        chat_client=llm,
-        embeddings_client=embeddings,
-    )
+    store = MemoryStore(container, embeddings_client=embeddings)
+    pipeline = PipelineService(store, chat, embeddings)
     # Avoid real LLM/prompty calls.
     pipeline._run_prompty = MagicMock(return_value=json.dumps(llm_response))
     pipeline._load_existing_memories = MagicMock(return_value=[])
@@ -71,14 +74,13 @@ def test_extract_stamps_top_level_confidence_on_facts():
     assert facts[0]["confidence"] == pytest.approx(0.92)
     # confidence must NOT live under metadata anymore.
     assert "confidence" not in facts[0]["metadata"]
-    assert result["facts_count"] == 1
+    assert result["fact_count"] == 1
 
 
 def test_extract_defaults_confidence_to_half_when_missing():
     pipeline, upserted = _make_pipeline(
         {
             "facts": [{"text": "User likes coffee", "action": "ADD"}],
-            "procedural": [{"instruction": "Greet warmly", "action": "ADD"}],
             "episodic": [
                 {
                     "scope_type": "project",
@@ -123,7 +125,7 @@ def test_extract_routes_unclassified_to_fact_with_tag():
     assert doc["confidence"] == pytest.approx(0.45)
     assert doc["metadata"]["unclassified_reason"] == "could be fact or episodic"
     assert result["unclassified_count"] == 1
-    assert result["facts_count"] == 0
+    assert result["fact_count"] == 0
 
 
 def test_extract_episodic_carries_confidence():
@@ -147,26 +149,6 @@ def test_extract_episodic_carries_confidence():
     assert ep["confidence"] == pytest.approx(0.8)
 
 
-def test_extract_procedural_carries_confidence():
-    pipeline, upserted = _make_pipeline(
-        {
-            "procedural": [
-                {
-                    "instruction": "Use ruff format",
-                    "category": "workflow",
-                    "source": "explicit_instruction",
-                    "confidence": 0.95,
-                    "salience": 0.9,
-                    "action": "ADD",
-                }
-            ]
-        }
-    )
-    pipeline.extract_memories("u1", "t1")
-    [pr] = [d for d in upserted if d["type"] == "procedural"]
-    assert pr["confidence"] == pytest.approx(0.95)
-
-
 class TestMarkSupersededDoesNotMutate:
     """``_mark_superseded`` must not mutate its input dict before the write.
 
@@ -178,9 +160,9 @@ class TestMarkSupersededDoesNotMutate:
     def test_input_dict_unchanged_on_success(self):
         from azure.core import MatchConditions
 
-        from agent_memory_toolkit.pipeline import ProcessingPipeline
+        from agent_memory_toolkit.services.pipeline import PipelineService
 
-        pipeline = ProcessingPipeline.__new__(ProcessingPipeline)
+        pipeline = PipelineService.__new__(PipelineService)
         pipeline._container = MagicMock()
 
         old_doc = {"id": "fact-1", "_etag": "etag-1", "content": "x"}
@@ -199,16 +181,16 @@ class TestMarkSupersededDoesNotMutate:
     def test_input_dict_unchanged_on_failure(self):
         from azure.cosmos.exceptions import CosmosAccessConditionFailedError
 
-        from agent_memory_toolkit.pipeline import ProcessingPipeline
+        from agent_memory_toolkit.services.pipeline import PipelineService
 
-        pipeline = ProcessingPipeline.__new__(ProcessingPipeline)
+        pipeline = PipelineService.__new__(PipelineService)
         pipeline._container = MagicMock()
         pipeline._container.replace_item.side_effect = CosmosAccessConditionFailedError(message="412", response=None)
 
         old_doc = {"id": "fact-1", "_etag": "etag-1", "content": "x"}
         snapshot = dict(old_doc)
 
-        result = pipeline._mark_superseded(old_doc, "fact-2", reason="contradiction")
+        result = pipeline._mark_superseded(old_doc, "fact-2", reason="contradict")
 
         assert result is False
         assert old_doc == snapshot
@@ -227,9 +209,9 @@ class TestGenerateUserSummaryThreadIdsObservabilityOnly:
     """
 
     def _build_pipeline(self):
-        from agent_memory_toolkit.pipeline import ProcessingPipeline
+        from agent_memory_toolkit.services.pipeline import PipelineService
 
-        pipeline = ProcessingPipeline.__new__(ProcessingPipeline)
+        pipeline = PipelineService.__new__(PipelineService)
         pipeline._embeddings = MagicMock()
         pipeline._embeddings.generate.return_value = [0.1] * 8
         pipeline._upsert_memory = MagicMock()
@@ -240,7 +222,7 @@ class TestGenerateUserSummaryThreadIdsObservabilityOnly:
     def test_thread_ids_does_not_appear_in_query_or_parameters(self):
         pipeline = self._build_pipeline()
         # No prior user-summary; first-pass full generation.
-        pipeline._container.read_item.side_effect = Exception("not found")
+        pipeline._container.read_item.side_effect = CosmosResourceNotFoundError(message="not found")
         # Two memories on different threads; the IN filter would drop t3.
         pipeline._container.query_items.return_value = iter(
             [
@@ -281,42 +263,6 @@ class TestGenerateUserSummaryThreadIdsObservabilityOnly:
         upserted = pipeline._upsert_memory.call_args.args[0]
         # Both threads must contribute to the resulting summary metadata.
         assert sorted(upserted["metadata"]["thread_ids"]) == ["t1", "t3"]
-
-
-class TestDrainPipelineResources:
-    """``_init_pipeline`` must drain prior sync resources on re-entry.
-
-    Calling ``connect_cosmos()`` more than once on the same async client
-    (container switch, credential rotation, reconnect) must not leak the
-    predecessor sync EmbeddingsClient or sync CosmosClient.
-    """
-
-    def test_reentry_closes_prior_sync_embeddings_and_cosmos(self):
-        from agent_memory_toolkit.aio.cosmos_memory_client import (
-            AsyncCosmosMemoryClient,
-        )
-
-        client = AsyncCosmosMemoryClient.__new__(AsyncCosmosMemoryClient)
-        prior_embed = MagicMock()
-        prior_cosmos = MagicMock()
-        client._sync_embeddings_client = prior_embed
-        client._sync_cosmos_client = prior_cosmos
-
-        client._drain_pipeline_resources()
-
-        prior_embed.close.assert_called_once()
-        prior_cosmos.close.assert_called_once()
-        assert client._sync_embeddings_client is None
-        assert client._sync_cosmos_client is None
-
-    def test_drain_is_safe_when_attributes_unset(self):
-        from agent_memory_toolkit.aio.cosmos_memory_client import (
-            AsyncCosmosMemoryClient,
-        )
-
-        client = AsyncCosmosMemoryClient.__new__(AsyncCosmosMemoryClient)
-        # No attribute set yet — must not AttributeError.
-        client._drain_pipeline_resources()
 
 
 # ---------------------------------------------------------------------------
@@ -400,7 +346,13 @@ def test_extract_past_event_episodic_uses_arrow_form_and_keeps_scope():
     assert "topic:db" in ep["tags"]
 
 
-def test_extract_summary_field_preferred_over_arrow_form():
+def test_extract_episodic_falls_back_to_arrow_form_when_summary_field_present():
+    """The schema dropped ``summary``; pipeline now always uses arrow form.
+
+    Even if a non-strict LLM smuggles a ``summary`` field through, the
+    pipeline ignores it and builds content from
+    ``situation → action_taken → outcome``.
+    """
     pipeline, upserted = _make_pipeline(
         {
             "episodic": [
@@ -419,7 +371,7 @@ def test_extract_summary_field_preferred_over_arrow_form():
     pipeline.extract_memories("u1", "t1")
 
     [ep] = [d for d in upserted if d["type"] == "episodic"]
-    assert ep["content"] == "User wants luxury hotels for the Paris trip."
+    assert ep["content"] == "Planning Paris trip → Said luxury → Pending"
 
 
 def test_extract_drops_episodic_missing_scope_type(caplog):

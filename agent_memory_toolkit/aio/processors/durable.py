@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any, Optional
 
+from agent_memory_toolkit.logging import get_logger
 from agent_memory_toolkit.processors.base import (
     ProcessThreadResult,
     UserSummaryResult,
 )
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class AsyncDurableFunctionProcessor:
@@ -92,6 +92,18 @@ class AsyncDurableFunctionProcessor:
             len(thread_summaries) if thread_summaries else 0,
         )
         return UserSummaryResult(summary=None)
+
+    async def synthesize_procedural(
+        self,
+        *,
+        user_id: str,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        raise NotImplementedError(
+            "Procedural synthesis runs automatically after reconcile in durable mode; "
+            "manual invocation via the SDK is not supported when the Durable Function "
+            "app is the active processor."
+        )
 
     async def close(self) -> None:
         logger.debug("AsyncDurableFunctionProcessor.close no-op")
