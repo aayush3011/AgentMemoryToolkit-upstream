@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any, Optional
 
 from agent_memory_toolkit._base import _BaseMemoryClient
+from agent_memory_toolkit._container_routing import container_key_for_type
 from agent_memory_toolkit._utils import (
     _build_container_kwargs,
     _container_policies,
@@ -33,6 +34,37 @@ if TYPE_CHECKING:  # pragma: no cover - typing-only import
 
 logger = get_logger(__name__)
 
+_TURNS_INDEXING_POLICY = {
+    "indexingMode": "consistent",
+    "automatic": True,
+    "includedPaths": [{"path": "/*"}],
+    "excludedPaths": [
+        {"path": "/embedding/?"},
+        {"path": "/source_memory_ids/*"},
+        {"path": "/supersedes_ids/*"},
+        {"path": '/"_etag"/?'},
+    ],
+}
+
+_SUMMARIES_INDEXING_POLICY = {
+    "indexingMode": "consistent",
+    "automatic": True,
+    "includedPaths": [{"path": "/*"}],
+    "excludedPaths": [
+        {"path": "/embedding/?"},
+        {"path": "/source_memory_ids/*"},
+        {"path": "/supersedes_ids/*"},
+        {"path": '/"_etag"/?'},
+    ],
+    "compositeIndexes": [
+        [
+            {"path": "/user_id", "order": "ascending"},
+            {"path": "/thread_id", "order": "ascending"},
+            {"path": "/version", "order": "descending"},
+        ]
+    ],
+}
+
 
 def _log_auto_trigger_task_failure(task: "asyncio.Task[Any]") -> None:
     if not task.cancelled() and (exc := task.exception()) is not None:
@@ -49,7 +81,8 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         cosmos_key: Optional[str] = None,
         cosmos_database: Optional[str] = None,
         cosmos_container: Optional[str] = None,
-        cosmos_turns_container: Optional[str] = None,
+        cosmos_turns_container: str = "memories_turns",
+        cosmos_summaries_container: str = "memories_summaries",
         cosmos_counter_container: Optional[str] = None,
         cosmos_lease_container: Optional[str] = None,
         cosmos_throughput_mode: Optional[str] = None,
@@ -70,6 +103,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             cosmos_database=cosmos_database,
             cosmos_container=cosmos_container,
             cosmos_turns_container=cosmos_turns_container,
+            cosmos_summaries_container=cosmos_summaries_container,
             cosmos_counter_container=cosmos_counter_container,
             cosmos_lease_container=cosmos_lease_container,
             cosmos_throughput_mode=cosmos_throughput_mode,
@@ -119,8 +153,9 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         if self._cosmos_client is not None:
             await self._cosmos_client.close()
             self._cosmos_client = None
-            self._container_client = None
+            self._memories_container_client = None
             self._turns_container_client = None
+            self._summaries_container_client = None
             self._counter_container_client = None
             self._store = None
             self._pipeline = None
@@ -157,11 +192,12 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         database: Optional[str] = None,
         container: Optional[str] = None,
         turns_container: Optional[str] = None,
+        summaries_container: Optional[str] = None,
     ) -> None:
-        """Establish an async connection to a Cosmos DB container.
+        """Establish an async connection to the Cosmos DB memory containers.
 
-        If *turns_container* is provided, it overrides the constructor's
-        ``cosmos_turns_container`` setting for this connection.
+        If container overrides are provided, they override the constructor's
+        settings for this connection.
         """
         self._cosmos_endpoint = endpoint or self._cosmos_endpoint
         if credential is not None:
@@ -173,6 +209,8 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         self._cosmos_container = container or self._cosmos_container
         if turns_container is not None:
             self._cosmos_turns_container = turns_container
+        if summaries_container is not None:
+            self._cosmos_summaries_container = summaries_container
         _validate_connection(
             self._cosmos_endpoint,
             self._cosmos_credential,
@@ -186,16 +224,19 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             client = CosmosClient(self._cosmos_endpoint, credential=self._cosmos_credential)
             db = client.get_database_client(self._cosmos_database)
             self._cosmos_client = client
-            self._container_client = db.get_container_client(self._cosmos_container)
-            if self._cosmos_turns_container:
-                self._turns_container_client = db.get_container_client(self._cosmos_turns_container)
-                logger.info(
-                    "Async connected turns container: %s/%s",
-                    self._cosmos_database,
-                    self._cosmos_turns_container,
-                )
-            else:
-                self._turns_container_client = None
+            self._memories_container_client = db.get_container_client(self._cosmos_container)
+            self._turns_container_client = db.get_container_client(self._cosmos_turns_container)
+            self._summaries_container_client = db.get_container_client(self._cosmos_summaries_container)
+            logger.info(
+                "Async connected turns container: %s/%s",
+                self._cosmos_database,
+                self._cosmos_turns_container,
+            )
+            logger.info(
+                "Async connected summaries container: %s/%s",
+                self._cosmos_database,
+                self._cosmos_summaries_container,
+            )
             self._init_services()
         except Exception as exc:
             raise CosmosOperationError(f"Failed to connect to Cosmos DB (async): {exc}") from exc
@@ -206,6 +247,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         database: Optional[str] = None,
         container: Optional[str] = None,
         turns_container: Optional[str] = None,
+        summaries_container: Optional[str] = None,
         counter_container: Optional[str] = None,
         lease_container: Optional[str] = None,
         endpoint: Optional[str] = None,
@@ -229,6 +271,8 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         self._cosmos_container = container or self._cosmos_container
         if turns_container is not None:
             self._cosmos_turns_container = turns_container
+        if summaries_container is not None:
+            self._cosmos_summaries_container = summaries_container
         self._cosmos_counter_container = counter_container or self._cosmos_counter_container
         self._cosmos_lease_container = lease_container or self._cosmos_lease_container
         self._cosmos_throughput_mode = _resolve_cosmos_throughput_mode(
@@ -263,7 +307,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                 distance_function=_resolve_distance_function(distance_function),
                 full_text_language=_resolve_full_text_language(full_text_language),
             )
-            self._container_client = await db.create_container_if_not_exists(
+            self._memories_container_client = await db.create_container_if_not_exists(
                 **_build_container_kwargs(
                     container_id=self._cosmos_container,
                     partition_key=partition_key,
@@ -273,6 +317,30 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                     vector_embedding_policy=vec_policy,
                     full_text_policy=ft_policy,
                 )
+            )
+            self._turns_container_client = await db.create_container_if_not_exists(
+                **_build_container_kwargs(
+                    container_id=self._cosmos_turns_container,
+                    partition_key=partition_key,
+                    offer_throughput=offer,
+                    default_ttl=DEFAULT_TTL_BY_TYPE["turn"],
+                    indexing_policy=_TURNS_INDEXING_POLICY,
+                )
+            )
+            logger.info("Created turns container: %s/%s", self._cosmos_database, self._cosmos_turns_container)
+            self._summaries_container_client = await db.create_container_if_not_exists(
+                **_build_container_kwargs(
+                    container_id=self._cosmos_summaries_container,
+                    partition_key=partition_key,
+                    offer_throughput=offer,
+                    default_ttl=-1,
+                    indexing_policy=_SUMMARIES_INDEXING_POLICY,
+                )
+            )
+            logger.info(
+                "Created summaries container: %s/%s",
+                self._cosmos_database,
+                self._cosmos_summaries_container,
             )
             await db.create_container_if_not_exists(
                 **_build_container_kwargs(
@@ -289,48 +357,79 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                 )
             )
             self._cosmos_client = client
-            if self._cosmos_turns_container:
-                self._turns_container_client = await db.create_container_if_not_exists(
-                    **_build_container_kwargs(
-                        container_id=self._cosmos_turns_container,
-                        partition_key=partition_key,
-                        offer_throughput=offer,
-                        default_ttl=DEFAULT_TTL_BY_TYPE["turn"],
-                        indexing_policy=idx_policy,
-                        vector_embedding_policy=vec_policy,
-                        full_text_policy=ft_policy,
-                    )
-                )
-                logger.info(
-                    "Created turns container: %s/%s",
-                    self._cosmos_database,
-                    self._cosmos_turns_container,
-                )
-            else:
-                self._turns_container_client = None
             self._init_services()
         except Exception as exc:
             raise CosmosOperationError(f"Failed to create memory store (async): {exc}") from exc
         logger.info("Async created memory store %s/%s", self._cosmos_database, self._cosmos_container)
 
-    def _init_services(self) -> None:
-        self._store = AsyncMemoryStore(
-            self._container_client,
-            embeddings_client=self._embeddings_client,
-            turns_container=self._turns_container_client,
+    async def validate_topology(self) -> None:
+        """Verify all three Cosmos containers exist and are reachable.
+
+        Reads container metadata for memories / memories_turns / memories_summaries.
+        Raises ``RuntimeError`` on the first failure with a clear message
+        instructing the customer to redeploy the infrastructure.
+
+        Call this after ``connect_cosmos`` or ``create_memory_store`` to
+        diagnose topology mismatches before any data is written.
+        """
+        from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+        if self._memories_container_client is None:
+            raise RuntimeError("validate_topology: Cosmos client is not connected; call connect_cosmos() first")
+        for key, client in self._containers.items():
+            if client is None:
+                raise RuntimeError(f"validate_topology: container for {key.value!r} is not connected")
+            container_id = getattr(client, "id", key.value)
+            try:
+                await client.read()
+            except CosmosResourceNotFoundError as exc:
+                raise RuntimeError(
+                    f"validate_topology: container {container_id!r} does not exist; "
+                    f"redeploy infrastructure (azd up) and ensure the SDK config matches"
+                ) from exc
+            except Exception as exc:
+                raise RuntimeError(
+                    f"validate_topology: cannot read container {container_id!r}: {type(exc).__name__}: {exc}"
+                ) from exc
+
+    def _build_store(self) -> AsyncMemoryStore:
+        return AsyncMemoryStore(containers=self._containers, embeddings_client=self._embeddings_client)
+
+    def _build_pipeline(self, store: AsyncMemoryStore) -> AsyncPipelineService:
+        return AsyncPipelineService(
+            store,
+            self._chat_client,
+            self._embeddings_client,
+            containers=self._containers,
         )
+
+    def _store_uses_current_clients(self) -> bool:
+        if self._store is None:
+            return False
+        containers = getattr(self._store, "_containers", None)
+        if not isinstance(containers, dict):
+            return False
+        return all(containers.get(key) is client for key, client in self._containers.items())
+
+    def _pipeline_uses_current_clients(self) -> bool:
+        if self._pipeline is None:
+            return False
+        containers = getattr(self._pipeline, "_containers", None)
+        if not isinstance(containers, dict):
+            return False
+        return all(containers.get(key) is client for key, client in self._containers.items())
+
+    def _init_services(self) -> None:
+        self._store = self._build_store()
         self._init_pipeline()
         if not self._processor_explicit:
             self._processor = None
 
     def _init_pipeline(self) -> None:
         """Initialize the AsyncPipelineService over the async store/clients."""
-        self._pipeline = AsyncPipelineService(
-            self._store,
-            self._chat_client,
-            self._embeddings_client,
-            cosmos_turns_container=self._turns_container_client,
-        )
+        if self._store is None:
+            self._store = self._build_store()
+        self._pipeline = self._build_pipeline(self._store)
         self._pipeline_init_error = None
 
     async def _drain_cosmos_client(self) -> None:
@@ -340,8 +439,9 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             if callable(close):
                 await close()
         self._cosmos_client = None
-        self._container_client = None
+        self._memories_container_client = None
         self._turns_container_client = None
+        self._summaries_container_client = None
         self._counter_container_client = None
         self._store = None
         self._pipeline = None
@@ -364,21 +464,18 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         _BaseMemoryClient._require_cosmos(self)
         if (
             self._store is None
-            or self._store.container is not self._container_client
+            or not self._store_uses_current_clients()
             or self._store._embeddings_client is not self._embeddings_client
-            or self._store._turns_container is not self._turns_container_client
         ):
-            self._store = AsyncMemoryStore(
-                self._container_client,
-                embeddings_client=self._embeddings_client,
-                turns_container=self._turns_container_client,
-            )
+            self._store = self._build_store()
         return self._store
 
     def _get_pipeline(self) -> AsyncPipelineService:
-        if self._pipeline is None:
-            _BaseMemoryClient._require_cosmos(self)
-            self._init_pipeline()
+        _BaseMemoryClient._require_cosmos(self)
+        store = self._get_store()
+        if self._pipeline is None or self._pipeline._store is not store or not self._pipeline_uses_current_clients():
+            self._pipeline = self._build_pipeline(store)
+            self._pipeline_init_error = None
         self._require_pipeline()
         return self._pipeline
 
@@ -413,77 +510,8 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         await maybe_trigger_steps(self._get_processor(), self._get_counter_container(), turn_counts)
 
     def _container_for_type(self, memory_type: str) -> Any:
-        """Return the appropriate container client based on memory type.
-
-        When ``cosmos_turns_container`` is configured, turn-type documents
-        are routed to the dedicated turns container. All other memory types
-        (fact, summary, episodic, procedural, user_summary) use the main
-        memories container.
-        """
-        if memory_type == "turn" and self._turns_container_client is not None:
-            return self._turns_container_client
-        return self._container_client
-
-    def _container_for_query(self, memory_types: Optional[list[str]] = None) -> Any:
-        """Return a single container for a read query.
-
-        This helper is intended for callers that target a known single
-        container (e.g., ``get_memories`` for derived memories, ``search_cosmos``
-        for vector search). It does NOT merge across containers.
-
-        When a dedicated turns container is configured:
-
-        * turn-only queries → turns container
-        * non-turn / unspecified / mixed queries → main memories container
-
-        Callers that need complete results across both containers (e.g.,
-        ``get_thread``) should use ``_containers_for_query()`` instead.
-
-        Note: ``get_memories(memory_types=None)`` returns derived memories
-        only (facts, episodic, procedural, summaries). Raw turns are
-        retrieved via ``get_thread()``.
-        """
-        if not memory_types:
-            return self._container_client
-
-        has_turn = any(t == "turn" for t in memory_types)
-        has_not_turn = any(t != "turn" for t in memory_types)
-
-        if self._turns_container_client is not None:
-            if has_turn and not has_not_turn:
-                return self._turns_container_client
-            if not has_turn:
-                return self._container_client
-            # Mixed: fall back to main (turns in separate container won't
-            # appear but this preserves backward-compat for callers that
-            # don't handle multi-container merging)
-            return self._container_client
-        return self._container_client
-
-    def _containers_for_query(self, memory_types: Optional[list[str]] = None) -> list[Any]:
-        """Return candidate containers for a read query.
-
-        Unlike :meth:`_container_for_query` which returns a single container,
-        this returns all containers that should be queried to get complete
-        results, enabling callers to merge across containers.
-        """
-        if self._turns_container_client is None:
-            return [self._container_client]
-
-        if not memory_types:
-            # Query spans both the main memories container and the
-            # turns container when memory_types is None.
-            return [self._container_client, self._turns_container_client]
-
-        has_turn = any(t == "turn" for t in memory_types)
-        has_not_turn = any(t != "turn" for t in memory_types)
-
-        if has_turn and has_not_turn:
-            return [self._container_client, self._turns_container_client]
-
-        if has_turn:
-            return [self._turns_container_client]
-        return [self._container_client]
+        """Return the Cosmos container client that owns ``memory_type``."""
+        return self._containers[container_key_for_type(memory_type)]
 
     async def add_cosmos(
         self,
@@ -560,15 +588,38 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
     async def update_cosmos(
         self,
         memory_id: str,
+        *,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
         content: Optional[str] = None,
         role: Optional[str] = None,
-        memory_type: Optional[str] = None,
         metadata: Optional[dict[str, Any]] = None,
     ) -> None:
-        return await self._get_store().update(memory_id, content, role, memory_type, metadata)
+        return await self._get_store().update(
+            memory_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            memory_type=memory_type,
+            content=content,
+            role=role,
+            metadata=metadata,
+        )
 
-    async def delete_cosmos(self, memory_id: str, thread_id: str, user_id: str) -> None:
-        return await self._get_store().delete(memory_id=memory_id, thread_id=thread_id, user_id=user_id)
+    async def delete_cosmos(
+        self,
+        memory_id: str,
+        *,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
+    ) -> None:
+        return await self._get_store().delete(
+            memory_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            memory_type=memory_type,
+        )
 
     async def search_cosmos(
         self,
@@ -612,7 +663,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         self,
         thread_id: str,
         user_id: Optional[str] = None,
-        memory_types: Optional[list[str]] = None,
         recent_k: Optional[int] = None,
         tags_all: Optional[list[str]] = None,
         tags_any: Optional[list[str]] = None,
@@ -624,7 +674,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         return await self._get_store().get_thread(
             thread_id=thread_id,
             user_id=user_id,
-            memory_types=memory_types,
             recent_k=recent_k,
             tags_all=tags_all,
             tags_any=tags_any,
@@ -632,6 +681,19 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             include_superseded=include_superseded,
             created_after=created_after,
             created_before=created_before,
+        )
+
+    async def get_thread_summary(
+        self,
+        user_id: str,
+        thread_id: str,
+        recent_k: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve active thread summaries for ``(user_id, thread_id)``, newest first."""
+        return await self._get_store().get_thread_summary(
+            user_id=user_id,
+            thread_id=thread_id,
+            recent_k=recent_k,
         )
 
     async def get_user_summary(self, user_id: str) -> Optional[dict[str, Any]]:
@@ -653,11 +715,25 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             include_sys=include_sys,
         )
 
-    async def add_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str]) -> None:
-        return await self._get_store().add_tags(memory_id, user_id, thread_id, tags)
+    async def add_tags(
+        self,
+        memory_id: str,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
+        tags: list[str],
+    ) -> None:
+        return await self._get_store().add_tags(memory_id, user_id, thread_id, memory_type, tags)
 
-    async def remove_tags(self, memory_id: str, user_id: str, thread_id: str, tags: list[str]) -> None:
-        return await self._get_store().remove_tags(memory_id, user_id, thread_id, tags)
+    async def remove_tags(
+        self,
+        memory_id: str,
+        user_id: str,
+        thread_id: str,
+        memory_type: str,
+        tags: list[str],
+    ) -> None:
+        return await self._get_store().remove_tags(memory_id, user_id, thread_id, memory_type, tags)
 
     async def get_procedural_prompt(self, user_id: str) -> Optional[str]:
         return await self._get_store().get_procedural_prompt(user_id=user_id)
@@ -736,13 +812,13 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
 
     async def process_now(self, *, user_id: str, thread_id: str) -> "ProcessThreadResult":
         _BaseMemoryClient._require_cosmos(self)
-        turns = await self.get_thread(thread_id=thread_id, user_id=user_id, memory_types=["turn"]) or []
+        turns = await self.get_thread(thread_id=thread_id, user_id=user_id) or []
         return await self._get_processor().process_thread(user_id=user_id, thread_id=thread_id, turns=turns)
 
     async def process_now_and_wait(self, *, user_id: str, thread_id: str, timeout: float = 30.0) -> bool:
         _BaseMemoryClient._require_cosmos(self)
         processor = self._get_processor()
-        turns = await self.get_thread(thread_id=thread_id, user_id=user_id, memory_types=["turn"]) or []
+        turns = await self.get_thread(thread_id=thread_id, user_id=user_id) or []
         await processor.process_thread(user_id=user_id, thread_id=thread_id, turns=turns)
         if isinstance(processor, AsyncInProcessProcessor):
             return True
@@ -755,13 +831,22 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         return False
 
     async def _summary_exists(self, *, user_id: str, thread_id: str) -> bool:
+        from azure.cosmos.exceptions import (
+            CosmosHttpResponseError,
+            CosmosResourceNotFoundError,
+        )
+
         try:
-            results = await self.get_memories(
-                user_id=user_id,
-                thread_id=thread_id,
-                memory_types=["summary"],
-                recent_k=1,
+            results = await self.get_thread_summary(user_id=user_id, thread_id=thread_id, recent_k=1)
+        except CosmosResourceNotFoundError:
+            return False
+        except CosmosHttpResponseError as exc:
+            logger.warning(
+                "_summary_exists: Cosmos error user_id=%s thread_id=%s status=%s: %s",
+                user_id,
+                thread_id,
+                getattr(exc, "status_code", None),
+                exc,
             )
-        except Exception:
             return False
         return bool(results)

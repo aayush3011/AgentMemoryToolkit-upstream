@@ -17,7 +17,9 @@ from agent_memory_toolkit.exceptions import CosmosNotConnectedError
 
 def _connected(processor=None) -> AsyncCosmosMemoryClient:
     client = AsyncCosmosMemoryClient(use_default_credential=False, processor=processor)
-    client._container_client = MagicMock()  # truthy → _require_cosmos passes
+    client._memories_container_client = MagicMock()  # truthy → _require_cosmos passes
+    client._turns_container_client = client._memories_container_client
+    client._summaries_container_client = client._memories_container_client
     return client
 
 
@@ -32,6 +34,8 @@ async def test_process_now_with_inprocess_invokes_pipeline():
     pipeline.generate_thread_summary.return_value = {"id": "s"}
     pipeline.extract_memories.return_value = {"facts": 1}
     pipeline.reconcile_memories.return_value = {"kept": 0, "merged": 0, "contradicted": 0}
+    pipeline._store = client._get_store()
+    pipeline._containers = dict(client._containers)
     client._pipeline = pipeline
     _patch_get_thread(client, [{"role": "user"}])
 
@@ -72,6 +76,8 @@ async def test_process_now_and_wait_inprocess_returns_true():
     pipeline.generate_thread_summary.return_value = {"id": "s"}
     pipeline.extract_memories.return_value = {}
     pipeline.reconcile_memories.return_value = {}
+    pipeline._store = client._get_store()
+    pipeline._containers = dict(client._containers)
     client._pipeline = pipeline
     _patch_get_thread(client, [])
 
@@ -82,7 +88,7 @@ async def test_process_now_and_wait_inprocess_returns_true():
 async def test_process_now_and_wait_durable_polls_until_summary_appears():
     client = _connected(processor=AsyncDurableFunctionProcessor())
     _patch_get_thread(client, [])
-    client.get_memories = AsyncMock(side_effect=[[], [], [{"id": "summary"}]])
+    client.get_thread_summary = AsyncMock(side_effect=[[], [], [{"id": "summary"}]])
 
     async def _no_sleep(_):
         return None
@@ -91,14 +97,14 @@ async def test_process_now_and_wait_durable_polls_until_summary_appears():
         ok = await client.process_now_and_wait(user_id="u", thread_id="t", timeout=5.0)
 
     assert ok is True
-    assert client.get_memories.await_count == 3
+    assert client.get_thread_summary.await_count == 3
 
 
 @pytest.mark.asyncio
 async def test_process_now_and_wait_durable_returns_false_on_timeout():
     client = _connected(processor=AsyncDurableFunctionProcessor())
     _patch_get_thread(client, [])
-    client.get_memories = AsyncMock(return_value=[])
+    client.get_thread_summary = AsyncMock(return_value=[])
 
     async def _no_sleep(_):
         return None
@@ -107,7 +113,7 @@ async def test_process_now_and_wait_durable_returns_false_on_timeout():
         ok = await client.process_now_and_wait(user_id="u", thread_id="t", timeout=0.01)
 
     assert ok is False
-    assert client.get_memories.await_count >= 1
+    assert client.get_thread_summary.await_count >= 1
 
 
 def test_constructor_accepts_processor_kwarg():

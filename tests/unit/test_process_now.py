@@ -17,7 +17,9 @@ from agent_memory_toolkit.processors import (
 
 def _connected(processor=None) -> CosmosMemoryClient:
     client = CosmosMemoryClient(use_default_credential=False, processor=processor)
-    client._container_client = MagicMock()
+    client._memories_container_client = MagicMock()
+    client._turns_container_client = client._memories_container_client
+    client._summaries_container_client = client._memories_container_client
     return client
 
 
@@ -29,9 +31,11 @@ def _patch_get_thread(client, turns):
 def test_process_now_with_inprocess_invokes_pipeline():
     client = _connected()  # default → InProcessProcessor lazily built
     pipeline = MagicMock()
-    pipeline.generate_thread_summary.return_value = {"id": "s", "type": "summary"}
+    pipeline.generate_thread_summary.return_value = {"id": "s", "type": "thread_summary"}
     pipeline.extract_memories.return_value = {"facts": 1}
     pipeline.reconcile_memories.return_value = {"kept": 0, "merged": 0, "contradicted": 0}
+    pipeline._store = client._get_store()
+    pipeline._containers = dict(client._containers)
     client._pipeline = pipeline  # short-circuit lazy build
     _patch_get_thread(client, [{"role": "user", "content": "hi"}])
 
@@ -71,6 +75,8 @@ def test_process_now_and_wait_inprocess_returns_true():
     pipeline.generate_thread_summary.return_value = {"id": "s"}
     pipeline.extract_memories.return_value = {}
     pipeline.reconcile_memories.return_value = {}
+    pipeline._store = client._get_store()
+    pipeline._containers = dict(client._containers)
     client._pipeline = pipeline
     _patch_get_thread(client, [])
 
@@ -82,37 +88,50 @@ def test_process_now_and_wait_durable_polls_until_summary_appears():
     _patch_get_thread(client, [])
 
     # First two polls return empty, third returns a summary
-    client.get_memories = MagicMock(side_effect=[[], [], [{"id": "summary_u_t"}]])
+    client.get_thread_summary = MagicMock(side_effect=[[], [], [{"id": "summary_u_t"}]])
 
     with patch("time.sleep"):
         ok = client.process_now_and_wait(user_id="u", thread_id="t", timeout=5.0)
 
     assert ok is True
-    assert client.get_memories.call_count == 3
+    assert client.get_thread_summary.call_count == 3
 
 
 def test_process_now_and_wait_durable_returns_false_on_timeout():
     client = _connected(processor=DurableFunctionProcessor())
     _patch_get_thread(client, [])
-    client.get_memories = MagicMock(return_value=[])
+    client.get_thread_summary = MagicMock(return_value=[])
 
     with patch("time.sleep"):
         ok = client.process_now_and_wait(user_id="u", thread_id="t", timeout=0.01)
 
     assert ok is False
-    assert client.get_memories.call_count >= 1
+    assert client.get_thread_summary.call_count >= 1
 
 
 def test_process_now_and_wait_durable_swallows_search_errors_until_timeout():
+    from azure.cosmos.exceptions import CosmosHttpResponseError
+
     client = _connected(processor=DurableFunctionProcessor())
     _patch_get_thread(client, [])
-    client.get_memories = MagicMock(side_effect=RuntimeError("transient"))
+    client.get_thread_summary = MagicMock(side_effect=CosmosHttpResponseError(message="429 throttled", status_code=429))
 
     with patch("time.sleep"):
         ok = client.process_now_and_wait(user_id="u", thread_id="t", timeout=0.01)
 
     assert ok is False
-    assert client.get_memories.call_count >= 1
+    assert client.get_thread_summary.call_count >= 1
+
+
+def test_process_now_and_wait_durable_propagates_non_cosmos_errors():
+    """Non-Cosmos errors must NOT be silently swallowed in the polling loop —
+    operators would otherwise wait the full timeout with no signal."""
+    client = _connected(processor=DurableFunctionProcessor())
+    _patch_get_thread(client, [])
+    client.get_thread_summary = MagicMock(side_effect=RuntimeError("bug"))
+
+    with patch("time.sleep"), pytest.raises(RuntimeError, match="bug"):
+        client.process_now_and_wait(user_id="u", thread_id="t", timeout=0.01)
 
 
 def test_constructor_accepts_processor_kwarg():

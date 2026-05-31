@@ -26,14 +26,15 @@ Prerequisites
 from __future__ import annotations
 
 import os
-
-from dotenv import load_dotenv
-load_dotenv()
 import textwrap
 import uuid
 from typing import Any
 
+from dotenv import load_dotenv
+
 from agent_memory_toolkit import CosmosMemoryClient
+
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -103,7 +104,7 @@ def run_demo() -> None:
     mem = CosmosMemoryClient(
         cosmos_endpoint=cosmos_endpoint,
         cosmos_database=os.environ.get("COSMOS_DB_DATABASE", "ai_memory"),
-        cosmos_container=os.environ.get("COSMOS_DB_CONTAINER", "memories"),
+        cosmos_container=os.environ.get("COSMOS_DB_MEMORIES_CONTAINER", "memories"),
         cosmos_key=os.environ.get("COSMOS_DB_KEY"),
         ai_foundry_endpoint=ai_foundry_endpoint,
         ai_foundry_api_key=os.environ.get("AI_FOUNDRY_API_KEY"),
@@ -258,14 +259,23 @@ def run_demo() -> None:
     # ------------------------------------------------------------------
     _print_section("Cleanup")
 
+    turns = mem.get_thread(thread_id=thread_id, user_id=user_id)
+    for item in turns:
+        mem.delete_cosmos(
+            memory_id=item["id"],
+            user_id=user_id,
+            thread_id=item.get("thread_id", thread_id),
+            memory_type="turn",
+        )
     stored = mem.get_memories(user_id=user_id, thread_id=thread_id)
     for item in stored:
         mem.delete_cosmos(
             memory_id=item["id"],
-            thread_id=item.get("thread_id", thread_id),
             user_id=user_id,
+            thread_id=item.get("thread_id", thread_id),
+            memory_type=item["type"],
         )
-    print(f"  Deleted {len(stored)} seeded memories.")
+    print(f"  Deleted {len(turns) + len(stored)} seeded memories.")
     print("\nDone ✓")
 
 

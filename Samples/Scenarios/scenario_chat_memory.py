@@ -16,13 +16,14 @@ Requirements:
 from __future__ import annotations
 
 import os
-
-from dotenv import load_dotenv
-load_dotenv()
 import time
 import uuid
 
+from dotenv import load_dotenv
+
 from agent_memory_toolkit import CosmosMemoryClient
+
+load_dotenv()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -144,7 +145,7 @@ def main() -> None:
     mem = CosmosMemoryClient(
         cosmos_endpoint=cosmos_endpoint,
         cosmos_database=os.environ.get("COSMOS_DB_DATABASE", "ai_memory"),
-        cosmos_container=os.environ.get("COSMOS_DB_CONTAINER", "memories"),
+        cosmos_container=os.environ.get("COSMOS_DB_MEMORIES_CONTAINER", "memories"),
         cosmos_key=os.environ.get("COSMOS_DB_KEY"),
         ai_foundry_endpoint=ai_foundry_endpoint,
         ai_foundry_api_key=os.environ.get("AI_FOUNDRY_API_KEY"),
@@ -170,7 +171,7 @@ def main() -> None:
     # ── Simulate reconnect: retrieve full thread ──────────────
     banner("Reconnect — Retrieve travel thread")
     print(f"  Fetching thread_id = {thread_1}\n")
-    thread = mem.get_thread(thread_id=thread_1)
+    thread = mem.get_thread(thread_id=thread_1, user_id=user_id)
     print_thread(thread)
     print(f"\n  Retrieved {len(thread)} turns from Cosmos DB.")
 

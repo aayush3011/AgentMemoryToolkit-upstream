@@ -36,8 +36,14 @@ param deployFunctionApp bool = true
 @description('Cosmos database name.')
 param cosmosDatabaseName string = 'ai_memory'
 
+@description('Memories container name.')
+param memoriesContainerName string = 'memories'
+
 @description('Turns container name.')
 param turnsContainerName string = 'memories_turns'
+
+@description('Summaries container name.')
+param summariesContainerName string = 'memories_summaries'
 
 @description('Default TTL for turn documents, in seconds. Use -1 to disable expiry.')
 param memoriesTurnsDefaultTtl int = 2592000
@@ -132,7 +138,9 @@ module cosmos 'modules/cosmos.bicep' = {
     location: location
     tags: commonTags
     databaseName: cosmosDatabaseName
+    memoriesContainerName: memoriesContainerName
     turnsContainerName: turnsContainerName
+    summariesContainerName: summariesContainerName
     memoriesTurnsDefaultTtl: memoriesTurnsDefaultTtl
     deployFunctionContainers: deployFunctionApp
     embeddingDimensions: embeddingDimensions
@@ -173,6 +181,7 @@ module functions 'modules/functions.bicep' = if (deployFunctionApp) {
     cosmosDatabase: cosmos.outputs.databaseName
     cosmosContainer: cosmos.outputs.memoriesContainerName
     cosmosTurnsContainer: cosmos.outputs.turnsContainerName
+    cosmosSummariesContainer: cosmos.outputs.summariesContainerName
     cosmosLeaseContainer: cosmos.outputs.leasesContainerName
     cosmosCountersContainer: cosmos.outputs.counterContainerName
     aiFoundryEndpoint: aiFoundry.outputs.endpoint
@@ -241,8 +250,9 @@ output RESOURCE_GROUP_NAME string = rg.name
 
 output COSMOS_DB_ENDPOINT string = cosmos.outputs.endpoint
 output COSMOS_DB_DATABASE string = cosmos.outputs.databaseName
-output COSMOS_DB_CONTAINER string = cosmos.outputs.memoriesContainerName
-output COSMOS_TURNS_CONTAINER string = cosmos.outputs.turnsContainerName
+output COSMOS_DB_MEMORIES_CONTAINER string = cosmos.outputs.memoriesContainerName
+output COSMOS_DB_TURNS_CONTAINER string = cosmos.outputs.turnsContainerName
+output COSMOS_DB_SUMMARIES_CONTAINER string = cosmos.outputs.summariesContainerName
 output COSMOS_DB_ACCOUNT_NAME string = cosmos.outputs.accountName
 
 output AI_FOUNDRY_ENDPOINT string = aiFoundry.outputs.endpoint
@@ -255,3 +265,5 @@ output AZURE_USER_ASSIGNED_IDENTITY_ID string = identity.outputs.id
 
 output FUNCTION_APP_NAME string = deployFunctionApp ? functions!.outputs.functionAppName : ''
 output FUNCTION_APP_URL string = deployFunctionApp ? functions!.outputs.functionAppUrl : ''
+
+output MEMORY_PROCESSOR_OWNER string = deployFunctionApp ? memoryProcessorOwner : 'inprocess'

@@ -88,19 +88,38 @@ def _add_turns(
 
 
 def _cleanup(mem: CosmosMemoryClient, user_id: str) -> None:
-    """Best-effort delete of every memory belonging to *user_id*."""
-    try:
-        for m in mem.get_memories(user_id=user_id, include_superseded=True):
-            try:
-                mem.delete_cosmos(
-                    memory_id=m["id"],
-                    thread_id=m.get("thread_id", ""),
-                    user_id=user_id,
+    """Best-effort delete of every memory belonging to *user_id* across all
+    split containers (turns, memories, summaries) so consecutive runs on the
+    same user_id do not accumulate residue."""
+
+    def _delete(container, doc: dict) -> None:
+        try:
+            container.delete_item(
+                item=doc["id"],
+                partition_key=[user_id, doc.get("thread_id", "")],
+            )
+        except Exception:
+            pass
+
+    sql = "SELECT c.id, c.thread_id FROM c WHERE c.user_id = @uid"
+    params = [{"name": "@uid", "value": user_id}]
+    for container in (
+        mem._turns_container_client,
+        mem._memories_container_client,
+        mem._summaries_container_client,
+    ):
+        try:
+            docs = list(
+                container.query_items(
+                    query=sql,
+                    parameters=params,
+                    enable_cross_partition_query=True,
                 )
-            except Exception:
-                pass
-    except Exception:
-        pass
+            )
+        except Exception:
+            continue
+        for doc in docs:
+            _delete(container, doc)
 
 
 # ---------------------------------------------------------------------------
@@ -129,13 +148,12 @@ class TestThreadSummary:
                 thread_id=unique_thread_id,
             )
             assert doc.get("id"), f"Expected summary doc with id, got {doc}"
-            assert doc.get("type") == "summary"
+            assert doc.get("type") == "thread_summary"
             assert doc.get("content"), "Summary content must not be empty"
 
-            summaries = agent_memory.get_memories(
+            summaries = agent_memory.get_thread_summary(
                 user_id=unique_user_id,
                 thread_id=unique_thread_id,
-                memory_types=["summary"],
             )
             assert len(summaries) >= 1
         finally:
@@ -204,6 +222,9 @@ class TestUserSummary:
                 ],
             )
             time.sleep(1)
+
+            agent_memory.generate_thread_summary(user_id=unique_user_id, thread_id=t1)
+            agent_memory.generate_thread_summary(user_id=unique_user_id, thread_id=t2)
 
             doc = agent_memory.generate_user_summary(
                 user_id=unique_user_id,
@@ -281,12 +302,14 @@ class TestTaggingAndSalience:
                 memory_id=mid,
                 user_id=unique_user_id,
                 thread_id=unique_thread_id,
+                memory_type="fact",
                 tags=["ui"],
             )
             agent_memory.remove_tags(
                 memory_id=mid,
                 user_id=unique_user_id,
                 thread_id=unique_thread_id,
+                memory_type="fact",
                 tags=["ide"],
             )
 

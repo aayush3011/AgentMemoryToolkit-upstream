@@ -105,7 +105,7 @@ az functionapp config appsettings set \
   --settings \
     COSMOS_DB_ENDPOINT="https://<cosmos-account-name>.documents.azure.com:443/" \
     COSMOS_DB_DATABASE="ai_memory" \
-    COSMOS_DB_CONTAINER="memories" \
+    COSMOS_DB_MEMORIES_CONTAINER="memories" \
     COSMOS_DB_COUNTERS_CONTAINER="counter" \
     COSMOS_DB_LEASE_CONTAINER="leases" \
     COSMOS_DB_THROUGHPUT_MODE="serverless" \
@@ -120,7 +120,7 @@ az functionapp config appsettings set \
     MEMORY_PROCESSOR_OWNER="durable"
 ```
 
-`COSMOS_DB_THROUGHPUT_MODE=serverless` is the default and creates the `memories`, `counter`, and `leases` containers without specifying RU/s. Set `COSMOS_DB_THROUGHPUT_MODE=autoscale` to apply the shared `COSMOS_DB_AUTOSCALE_MAX_RU` cap to all required containers.
+`COSMOS_DB_THROUGHPUT_MODE=serverless` is the default and creates the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers without specifying RU/s. Set `COSMOS_DB_THROUGHPUT_MODE=autoscale` to apply the shared `COSMOS_DB_AUTOSCALE_MAX_RU` cap to all required containers.
 
 `MEMORY_PROCESSOR_OWNER=durable` tells the SDK that the deployed Function App owns processing, so any `CosmosMemoryClient` pointed at the same container will skip its in-process auto-trigger and avoid double-extraction. See the README's processor-ownership table for details.
 
@@ -178,7 +178,7 @@ Update `.env` to point at Azure instead of localhost:
 ```env
 COSMOS_DB_ENDPOINT=https://<cosmos-account-name>.documents.azure.com:443/
 COSMOS_DB_DATABASE=ai_memory
-COSMOS_DB_CONTAINER=memories
+COSMOS_DB_MEMORIES_CONTAINER=memories
 COSMOS_DB_COUNTERS_CONTAINER=counter
 COSMOS_DB_LEASE_CONTAINER=leases
 COSMOS_DB_THROUGHPUT_MODE=serverless
@@ -213,7 +213,7 @@ load_dotenv()
 memory = CosmosMemoryClient(
     cosmos_endpoint=os.getenv("COSMOS_DB_ENDPOINT"),
     cosmos_database=os.getenv("COSMOS_DB_DATABASE", "ai_memory"),
-    cosmos_container=os.getenv("COSMOS_DB_CONTAINER", "memories"),
+    cosmos_container=os.getenv("COSMOS_DB_MEMORIES_CONTAINER", "memories"),
     cosmos_counter_container=os.getenv("COSMOS_DB_COUNTERS_CONTAINER", "counter"),
     cosmos_lease_container=os.getenv("COSMOS_DB_LEASE_CONTAINER", "leases"),
     cosmos_throughput_mode=os.getenv("COSMOS_DB_THROUGHPUT_MODE", "serverless"),
@@ -242,7 +242,7 @@ load_dotenv()
 memory = AsyncCosmosMemoryClient(
     cosmos_endpoint=os.getenv("COSMOS_DB_ENDPOINT"),
     cosmos_database=os.getenv("COSMOS_DB_DATABASE", "ai_memory"),
-    cosmos_container=os.getenv("COSMOS_DB_CONTAINER", "memories"),
+    cosmos_container=os.getenv("COSMOS_DB_MEMORIES_CONTAINER", "memories"),
     cosmos_counter_container=os.getenv("COSMOS_DB_COUNTERS_CONTAINER", "counter"),
     cosmos_lease_container=os.getenv("COSMOS_DB_LEASE_CONTAINER", "leases"),
     cosmos_throughput_mode=os.getenv("COSMOS_DB_THROUGHPUT_MODE", "serverless"),
@@ -258,7 +258,7 @@ await memory.connect_cosmos()
 await memory.create_memory_store()
 ```
 
-This provisions the `memories`, `counter`, and `leases` containers. `serverless` is the default throughput mode; if you set `COSMOS_DB_THROUGHPUT_MODE=autoscale`, the shared `COSMOS_DB_AUTOSCALE_MAX_RU` value is applied to all three containers.
+This provisions the `memories`, `memories_turns`, `memories_summaries`, `counter`, and `leases` containers. `serverless` is the default throughput mode; if you set `COSMOS_DB_THROUGHPUT_MODE=autoscale`, the shared `COSMOS_DB_AUTOSCALE_MAX_RU` value is applied to all five containers.
 
 ---
 
@@ -314,9 +314,9 @@ for i in range(10):
 
 # Wait for the change-feed processor to catch up, then read derived memories.
 import time; time.sleep(15)
-print(memory.get_memories(user_id="user-1", thread_id="thread-1", memory_types=["summary"]))
+print(memory.get_thread_summary(user_id="user-1", thread_id="thread-1"))
 print(memory.get_memories(user_id="user-1", memory_types=["fact"]))
-print(memory.get_memories(user_id="user-1", memory_types=["user_summary"]))
+print(memory.get_user_summary(user_id="user-1"))
 ```
 
 ### Change feed auto-processing
@@ -339,7 +339,7 @@ for i in range(3):
 # Wait a few seconds for the change feed to trigger, then check:
 import time
 time.sleep(10)
-results = memory.get_memories(user_id="user-1", thread_id=thread_id, memory_types=["summary"])
+results = memory.get_thread_summary(user_id="user-1", thread_id=thread_id)
 print(results)  # Should contain an auto-generated summary
 ```
 
@@ -348,9 +348,9 @@ Check the Function App logs to confirm the `on_memory_change` trigger fired and 
 ### Verify stored results
 
 ```python
-print(memory.get_memories(user_id="user-1", memory_types=["summary"]))
+print(memory.get_thread_summary(user_id="user-1", thread_id="thread-1"))
 print(memory.get_memories(user_id="user-1", memory_types=["fact"]))
-print(memory.get_memories(user_id="user-1", memory_types=["user_summary"]))
+print(memory.get_user_summary(user_id="user-1"))
 ```
 
 ---

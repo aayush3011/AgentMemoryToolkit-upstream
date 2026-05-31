@@ -83,7 +83,7 @@ def main() -> None:
         cosmos_endpoint=os.environ["COSMOS_DB_ENDPOINT"],
         cosmos_key=os.environ.get("COSMOS_DB_KEY") or None,
         cosmos_database=os.environ.get("COSMOS_DB_DATABASE", "ai_memory"),
-        cosmos_container=os.environ.get("COSMOS_DB_CONTAINER", "memories"),
+        cosmos_container=os.environ.get("COSMOS_DB_MEMORIES_CONTAINER", "memories"),
         ai_foundry_endpoint=os.environ["AI_FOUNDRY_ENDPOINT"],
         ai_foundry_api_key=os.environ.get("AI_FOUNDRY_API_KEY") or None,
         embedding_deployment_name=os.environ.get("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
@@ -163,8 +163,9 @@ def main() -> None:
                 try:
                     mem.delete_cosmos(
                         memory_id=rec["id"],
-                        thread_id=rec.get("thread_id", unique_thread_id),
                         user_id=unique_user_id,
+                        thread_id=rec.get("thread_id", unique_thread_id),
+                        memory_type=rec["type"],
                     )
                     deleted += 1
                 except Exception as exc:  # pragma: no cover - best effort cleanup

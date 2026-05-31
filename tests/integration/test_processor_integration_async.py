@@ -16,7 +16,7 @@ from agent_memory_toolkit.aio.processors import (
 
 def _build_client(processor=None) -> AsyncCosmosMemoryClient:
     client = AsyncCosmosMemoryClient(use_default_credential=False, processor=processor)
-    client._container_client = MagicMock()  # truthy → _require_cosmos passes
+    client._memories_container_client = MagicMock()  # truthy → _require_cosmos passes
     return client
 
 
@@ -35,7 +35,7 @@ class TestAsyncInProcessProcessNowEndToEnd:
         pipeline.generate_thread_summary = AsyncMock(
             return_value={
                 "id": "summary-1",
-                "type": "summary",
+                "type": "thread_summary",
                 "content": "Conversation about Paris.",
             }
         )
@@ -62,7 +62,7 @@ class TestAsyncInProcessProcessNowEndToEnd:
         assert isinstance(result, ProcessThreadResult)
         assert result.thread_summary == {
             "id": "summary-1",
-            "type": "summary",
+            "type": "thread_summary",
             "content": "Conversation about Paris.",
         }
         assert result.extracted_counts == {
@@ -70,7 +70,7 @@ class TestAsyncInProcessProcessNowEndToEnd:
             "episodic_count": 0,
             "updated_count": 0,
         }
-        client.get_thread.assert_awaited_once_with(thread_id="thread-paris", user_id="u-paris", memory_types=["turn"])
+        client.get_thread.assert_awaited_once_with(thread_id="thread-paris", user_id="u-paris")
         pipeline.generate_thread_summary.assert_awaited_once_with("u-paris", "thread-paris")
         pipeline.extract_memories.assert_awaited_once_with("u-paris", "thread-paris")
         pipeline.reconcile_memories.assert_awaited_once_with("u-paris", 50)
@@ -118,11 +118,11 @@ class TestAsyncDurableProcessNowAndWaitPolling:
         client = _build_client(processor=AsyncDurableFunctionProcessor())
         client.get_thread = AsyncMock(return_value=[])
 
-        client.get_memories = AsyncMock(
+        client.get_thread_summary = AsyncMock(
             side_effect=[
                 [],
                 [],
-                [{"id": "summary-1", "memory_type": "summary", "content": "..."}],
+                [{"id": "summary-1", "memory_type": "thread_summary", "content": "..."}],
             ]
         )
 
@@ -134,12 +134,11 @@ class TestAsyncDurableProcessNowAndWaitPolling:
         ok = await client.process_now_and_wait(user_id="u-poll", thread_id="th-poll", timeout=10.0)
 
         assert ok is True
-        assert client.get_memories.await_count == 3
-        for call in client.get_memories.await_args_list:
+        assert client.get_thread_summary.await_count == 3
+        for call in client.get_thread_summary.await_args_list:
             kwargs = call.kwargs
             assert kwargs["user_id"] == "u-poll"
             assert kwargs["thread_id"] == "th-poll"
-            assert kwargs["memory_types"] == ["summary"]
 
 
 # ---------------------------------------------------------------------------
@@ -152,7 +151,7 @@ class TestAsyncDurableProcessNowAndWaitTimeout:
     async def test_returns_false_after_timeout(self, monkeypatch):
         client = _build_client(processor=AsyncDurableFunctionProcessor())
         client.get_thread = AsyncMock(return_value=[])
-        client.get_memories = AsyncMock(return_value=[])
+        client.get_thread_summary = AsyncMock(return_value=[])
 
         async def _no_sleep(*_a, **_k):
             return None
@@ -166,9 +165,13 @@ class TestAsyncDurableProcessNowAndWaitTimeout:
 
     @pytest.mark.asyncio
     async def test_timeout_swallows_search_errors(self, monkeypatch):
+        from azure.cosmos.exceptions import CosmosHttpResponseError
+
         client = _build_client(processor=AsyncDurableFunctionProcessor())
         client.get_thread = AsyncMock(return_value=[])
-        client.get_memories = AsyncMock(side_effect=RuntimeError("transient"))
+        client.get_thread_summary = AsyncMock(
+            side_effect=CosmosHttpResponseError(message="429 throttled", status_code=429)
+        )
 
         async def _no_sleep(*_a, **_k):
             return None

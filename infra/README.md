@@ -6,7 +6,15 @@ This folder provisions everything the Agent Memory Toolkit needs in a single Azu
 
 `azd up` creates **all** of the following:
 
-- **Cosmos DB for NoSQL** — serverless account with the `ai_memory` database and the `memories`, `memories_turns`, `leases`, and `counter` containers
+- **Cosmos DB for NoSQL** — serverless account with the `ai_memory` database and this container topology:
+
+  | Container | Purpose |
+  | --- | --- |
+  | `memories` | Facts, episodics, and procedural memories; vector + FTS index |
+  | `memories_turns` | Turns; minimal index, change-feed binding target |
+  | `memories_summaries` | Thread + user summaries; minimal index, point-read access pattern |
+  | `leases` | Change-feed checkpoints |
+  | `counter` | Atomic counters |
 - **AI Foundry** (`Microsoft.CognitiveServices/accounts` with `kind: AIServices`) — with `gpt-4o-mini` and `text-embedding-3-large` deployments
 - **User-assigned managed identity (UAMI)** — used by the Function app
 - **RBAC role assignments** — Cosmos DB Built-in Data Reader + Contributor, Cognitive Services OpenAI User, Storage Blob/Queue/Table data roles, granted to both the UAMI and the deploying user (full table in [Identity & RBAC](#identity--rbac))
@@ -43,7 +51,7 @@ azd up
 ```
 COSMOS_DB_ENDPOINT=...
 COSMOS_DB_DATABASE=ai_memory
-COSMOS_DB_CONTAINER=memories
+COSMOS_DB_MEMORIES_CONTAINER=memories
 AI_FOUNDRY_ENDPOINT=...
 AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME=text-embedding-3-large
 AI_FOUNDRY_CHAT_DEPLOYMENT_NAME=gpt-4o-mini
@@ -69,6 +77,12 @@ azd provision   # skips Function app, Storage, App Insights, Log Analytics, stor
 ```
 
 > Use **`azd provision`** (not `azd up`) for SDK-only. `azd up` always invokes `azd deploy --all`, which looks for a resource tagged `azd-service-name: function_app`. With the Function app turned off there is no such resource and the deploy step fails. `azd provision` runs Bicep without the deploy step.
+
+When `DEPLOY_FUNCTION_APP=false`, the Bicep template automatically sets `MEMORY_PROCESSOR_OWNER=inprocess` in the generated `.env` so the in-process processor's auto-trigger fires. If you previously deployed with `DEPLOY_FUNCTION_APP=true` and are switching to SDK-only mode, also clear the override explicitly:
+
+```bash
+azd env set MEMORY_PROCESSOR_OWNER inprocess
+```
 
 ## Model / deployment names
 
@@ -99,13 +113,13 @@ The Function app uses a counter document per `(user_id, thread_id)` to decide wh
 | `azd env` variable | Bicep param | Default | Effect |
 |---|---|---|---|
 | `THREAD_SUMMARY_EVERY_N` | `threadSummaryEveryN` | `10` | Run thread-summary orchestration every N turns within a `(user_id, thread_id)`. `0` disables it. |
-| `FACT_EXTRACTION_EVERY_N` | `factExtractionEveryN` | `5` | Run fact / episodic / procedural extraction every N turns within a `(user_id, thread_id)`. `0` disables it. |
+| `FACT_EXTRACTION_EVERY_N` | `factExtractionEveryN` | `1` | Run fact / episodic / procedural extraction every N turns within a `(user_id, thread_id)`. `0` disables it. |
 | `DEDUP_EVERY_N` | `dedupEveryN` | `5` | Run fact dedup every Nth fact-extraction (so dedup actually fires every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns). |
 | `USER_SUMMARY_EVERY_N` | `userSummaryEveryN` | `20` | Run user-summary orchestration every N turns from a given `user_id` across all threads. `0` disables it. |
 | `MAX_BATCH_SIZE` | `maxBatchSize` | `20` | Maximum number of change-feed items processed per orchestration batch. |
 | `MEMORY_PROCESSOR_OWNER` | `memoryProcessorOwner` | `durable` | Backend that owns processing. `durable` = this function-app fleet owns it; SDK clients pointed at the same container will skip auto-triggering. `inprocess` = SDK owns processing instead. |
 
-The defaults are **deliberately higher than the SDK in-process defaults** (the in-process backend uses `FACT_EXTRACTION_EVERY_N=1` for prototype/demo UX). The Function-app fleet pays real per-turn LLM cost on every orchestrator invocation; amortizing keeps it affordable for production traffic. Override either layer to match your workload.
+The Function-app defaults match the SDK in-process defaults so behavior is consistent across backends. The Function-app fleet pays real per-turn LLM cost on every orchestrator invocation; bump `FACT_EXTRACTION_EVERY_N` / `DEDUP_EVERY_N` for cost-sensitive production traffic.
 
 Set any value to `0` to **disable auto-triggering** for that orchestrator. Update at runtime with:
 
@@ -172,7 +186,7 @@ infra/
 ├── abbreviations.json                # standard Azure name prefixes
 └── modules/
     ├── identity.bicep                # User-assigned managed identity
-    ├── cosmos.bicep                  # Cosmos DB NoSQL serverless account + database + 4 containers
+    ├── cosmos.bicep                  # Cosmos DB NoSQL serverless account + database + 5 containers
     ├── cosmos-rbac.bicep             # Cosmos data-plane role assignments
     ├── ai-foundry.bicep              # Cognitive Services AIServices account + chat + embedding deployments
     ├── ai-foundry-rbac.bicep         # Cognitive Services OpenAI User role assignments

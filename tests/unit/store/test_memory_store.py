@@ -5,7 +5,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from agent_memory_toolkit.exceptions import MemoryNotFoundError
+from agent_memory_toolkit._container_routing import ContainerKey
+from agent_memory_toolkit.exceptions import MemoryNotFoundError, MemoryTypeMismatchError
 from agent_memory_toolkit.store import MemoryStore
 
 
@@ -25,13 +26,21 @@ def _doc(**overrides):
     return doc
 
 
+def _containers(*, turns=None, memories=None, summaries=None):
+    return {
+        ContainerKey.TURNS: turns if turns is not None else MagicMock(),
+        ContainerKey.MEMORIES: memories if memories is not None else MagicMock(),
+        ContainerKey.SUMMARIES: summaries if summaries is not None else MagicMock(),
+    }
+
+
 def test_add_upserts_memory_document():
-    container = MagicMock()
-    store = MemoryStore(container)
+    turns = MagicMock()
+    store = MemoryStore(containers=_containers(turns=turns))
 
     memory_id = store.add(user_id="u1", role="user", content="hello", thread_id="t1")
 
-    body = container.upsert_item.call_args.kwargs["body"]
+    body = turns.upsert_item.call_args.kwargs["body"]
     assert memory_id == body["id"]
     assert body["user_id"] == "u1"
     assert body["content"] == "hello"
@@ -46,7 +55,7 @@ def test_add_upserts_memory_document():
     ],
 )
 def test_prepare_doc_applies_default_ttl(memory_type, expected_ttl):
-    store = MemoryStore(MagicMock())
+    store = MemoryStore(containers=_containers())
 
     body = store._prepare_doc(_doc(type=memory_type))
 
@@ -55,16 +64,16 @@ def test_prepare_doc_applies_default_ttl(memory_type, expected_ttl):
 
 @pytest.mark.parametrize("ttl", [0, 60, -1])
 def test_prepare_doc_preserves_caller_ttl(ttl):
-    store = MemoryStore(MagicMock())
+    store = MemoryStore(containers=_containers())
 
     body = store._prepare_doc(_doc(type="episodic", ttl=ttl))
 
     assert body["ttl"] == ttl
 
 
-@pytest.mark.parametrize("memory_type", ["fact", "summary", "user_summary", "procedural", "unknown"])
+@pytest.mark.parametrize("memory_type", ["fact", "thread_summary", "user_summary", "procedural", "unknown"])
 def test_prepare_doc_omits_ttl_for_never_types(memory_type):
-    store = MemoryStore(MagicMock())
+    store = MemoryStore(containers=_containers())
 
     body = store._prepare_doc(_doc(type=memory_type))
 
@@ -72,87 +81,140 @@ def test_prepare_doc_omits_ttl_for_never_types(memory_type):
 
 
 def test_push_batches_and_embeds_non_turn_records():
-    container = MagicMock()
+    memories = MagicMock()
     embeddings = MagicMock()
     embeddings.generate_batch.return_value = [[0.1, 0.2]]
     local = [_doc(id="f1", type="fact", content="fact", thread_id="facts")]
-    store = MemoryStore(container, embeddings_client=embeddings)
+    store = MemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings)
 
     store.push(local, batch_size=10)
 
     embeddings.generate_batch.assert_called_once_with(["fact"])
-    body = container.upsert_item.call_args.kwargs["body"]
+    body = memories.upsert_item.call_args.kwargs["body"]
     assert body["embedding"] == [0.1, 0.2]
     assert local[0]["embedding"] == [0.1, 0.2]
 
 
 def test_query_wraps_query_items():
-    container = MagicMock()
-    container.query_items.return_value = [_doc()]
-    store = MemoryStore(container)
+    memories = MagicMock()
+    memories.query_items.return_value = [_doc(type="fact")]
+    store = MemoryStore(containers=_containers(memories=memories))
 
     results = store.query(
         "SELECT * FROM c WHERE c.user_id = @user_id",
         [{"name": "@user_id", "value": "u1"}],
+        container_key=ContainerKey.MEMORIES,
         cross_partition=True,
     )
 
-    assert results == [_doc()]
-    assert container.query_items.call_args.kwargs["enable_cross_partition_query"] is True
+    assert results == [_doc(type="fact")]
+    assert memories.query_items.call_args.kwargs["enable_cross_partition_query"] is True
 
 
 def test_update_replaces_matching_doc():
-    container = MagicMock()
-    container.query_items.return_value = [_doc()]
-    store = MemoryStore(container)
+    memories = MagicMock()
+    memories.read_item.return_value = _doc(id="m1", type="fact")
+    store = MemoryStore(containers=_containers(memories=memories))
 
-    store.update("m1", content="updated")
+    store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content="updated")
 
-    body = container.replace_item.call_args.kwargs["body"]
+    memories.read_item.assert_called_once_with(item="m1", partition_key=["u1", "t1"])
+    body = memories.replace_item.call_args.kwargs["body"]
     assert body["content"] == "updated"
+    assert body["type"] == "fact"
     assert "updated_at" in body
 
 
 def test_update_raises_when_missing():
-    container = MagicMock()
-    container.query_items.return_value = []
-    store = MemoryStore(container)
+    from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+    memories = MagicMock()
+    memories.read_item.side_effect = CosmosResourceNotFoundError(message="404")
+    store = MemoryStore(containers=_containers(memories=memories))
 
     with pytest.raises(MemoryNotFoundError):
-        store.update("missing")
+        store.update("missing", user_id="u1", thread_id="t1", memory_type="fact")
 
 
-def test_delete_checks_existence_then_deletes():
-    container = MagicMock()
-    container.query_items.return_value = [{"id": "m1"}]
-    store = MemoryStore(container)
+def test_update_raises_on_type_mismatch():
+    memories = MagicMock()
+    memories.read_item.return_value = _doc(id="m1", type="fact")
+    store = MemoryStore(containers=_containers(memories=memories))
 
-    store.delete("m1", thread_id="t1", user_id="u1")
+    with pytest.raises(MemoryTypeMismatchError):
+        store.update("m1", user_id="u1", thread_id="t1", memory_type="episodic", content="x")
 
-    container.delete_item.assert_called_once_with(item="m1", partition_key=["u1", "t1"])
+    memories.replace_item.assert_not_called()
+
+
+def test_delete_calls_delete_item_directly():
+    memories = MagicMock()
+    memories.read_item.return_value = _doc(id="m1", type="fact")
+    store = MemoryStore(containers=_containers(memories=memories))
+
+    store.delete("m1", user_id="u1", thread_id="t1", memory_type="fact")
+
+    memories.delete_item.assert_called_once_with(item="m1", partition_key=["u1", "t1"])
+
+
+def test_delete_raises_when_missing():
+    from azure.cosmos.exceptions import CosmosResourceNotFoundError
+
+    memories = MagicMock()
+    memories.read_item.side_effect = CosmosResourceNotFoundError(message="404")
+    store = MemoryStore(containers=_containers(memories=memories))
+
+    with pytest.raises(MemoryNotFoundError):
+        store.delete("m1", user_id="u1", thread_id="t1", memory_type="fact")
+
+    memories.delete_item.assert_not_called()
+
+
+def test_delete_raises_on_type_mismatch():
+    memories = MagicMock()
+    memories.read_item.return_value = _doc(id="m1", type="fact")
+    store = MemoryStore(containers=_containers(memories=memories))
+
+    with pytest.raises(MemoryTypeMismatchError):
+        store.delete("m1", user_id="u1", thread_id="t1", memory_type="episodic")
+
+    memories.delete_item.assert_not_called()
 
 
 def test_read_and_tag_mutation_use_point_reads():
-    container = MagicMock()
-    container.read_item.return_value = _doc(tags=["old"])
-    store = MemoryStore(container)
+    memories = MagicMock()
+    memories.read_item.return_value = _doc(type="fact", tags=["old"])
+    store = MemoryStore(containers=_containers(memories=memories))
 
-    assert store.read_item("m1", ["u1", "t1"])["id"] == "m1"
-    store.add_tags("m1", "u1", "t1", ["New"])
-    store.remove_tags("m1", "u1", "t1", ["old"])
+    assert store.read_item("m1", ["u1", "t1"], container_key=ContainerKey.MEMORIES)["id"] == "m1"
+    store.add_tags("m1", "u1", "t1", "fact", ["New"])
+    store.remove_tags("m1", "u1", "t1", "fact", ["old"])
 
-    assert container.read_item.call_args_list[0].kwargs == {"item": "m1", "partition_key": ["u1", "t1"]}
-    assert container.replace_item.call_count == 2
+    assert memories.read_item.call_args_list[0].kwargs == {"item": "m1", "partition_key": ["u1", "t1"]}
+    assert memories.replace_item.call_count == 2
+
+
+def test_tag_mutation_rejects_non_memories_types():
+    store = MemoryStore(containers=_containers())
+
+    for bad in ("turn", "thread_summary", "user_summary", "unknown"):
+        with pytest.raises(ValueError, match="memory_type for tag mutation"):
+            store.add_tags("m1", "u1", "t1", bad, ["x"])
 
 
 def test_single_doc_and_simple_query_helpers():
-    container = MagicMock()
-    container.read_item.return_value = {"id": "user_summary_u1"}
-    container.query_items.return_value = [_doc(content="prompt", version=1)]
-    store = MemoryStore(container)
+    turns = MagicMock()
+    memories = MagicMock()
+    summaries = MagicMock()
+    turns.query_items.return_value = [_doc(content="turn")]
+    memories.query_items.return_value = [_doc(type="procedural", content="prompt", version=1)]
+    summaries.read_item.return_value = {"id": "user_summary_u1"}
+    summaries.query_items.return_value = [_doc(type="thread_summary", content="ts")]
+    store = MemoryStore(containers=_containers(turns=turns, memories=memories, summaries=summaries))
 
     assert store.get_user_summary("u1") == {"id": "user_summary_u1"}
     assert store.get_thread("t1")
+    assert store.get_thread_summary("u1", "t1")
     assert store.get_procedural_prompt("u1") == "prompt"
     assert store.get_procedural_history("u1", limit=1)
     assert store.get_procedural_memories("u1")
@@ -163,14 +225,19 @@ def _params_by_name(call_kwargs):
 
 
 def test_get_memories_adds_created_time_range_filters():
-    container = MagicMock()
-    container.query_items.return_value = []
-    store = MemoryStore(container)
+    memories = MagicMock()
+    memories.query_items.return_value = []
+    store = MemoryStore(containers=_containers(memories=memories))
     after = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
-    store.get_memories(user_id="u1", created_after=after, created_before="2026-02-01T00:00:00+00:00")
+    store.get_memories(
+        user_id="u1",
+        memory_types=["fact"],
+        created_after=after,
+        created_before="2026-02-01T00:00:00+00:00",
+    )
 
-    call_kwargs = container.query_items.call_args.kwargs
+    call_kwargs = memories.query_items.call_args.kwargs
     assert "c.created_at >= @created_after" in call_kwargs["query"]
     assert "c.created_at <= @created_before" in call_kwargs["query"]
     params = _params_by_name(call_kwargs)
@@ -179,28 +246,106 @@ def test_get_memories_adds_created_time_range_filters():
 
 
 def test_get_thread_adds_created_time_range_filters():
-    container = MagicMock()
-    container.query_items.return_value = []
-    store = MemoryStore(container)
+    turns = MagicMock()
+    turns.query_items.return_value = []
+    store = MemoryStore(containers=_containers(turns=turns))
 
     store.get_thread("t1", user_id="u1", created_after="2026-01-01T00:00:00+00:00")
 
-    call_kwargs = container.query_items.call_args.kwargs
+    call_kwargs = turns.query_items.call_args.kwargs
     assert "c.created_at >= @created_after" in call_kwargs["query"]
     params = _params_by_name(call_kwargs)
     assert params["@created_after"] == "2026-01-01T00:00:00+00:00"
 
 
 def test_search_adds_created_time_range_filters():
-    container = MagicMock()
-    container.query_items.return_value = []
+    memories = MagicMock()
+    memories.query_items.return_value = []
     embeddings = MagicMock()
     embeddings.generate.return_value = [0.1, 0.2]
-    store = MemoryStore(container, embeddings_client=embeddings)
+    store = MemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings)
 
     store.search("weather", user_id="u1", created_before="2026-03-01T00:00:00+00:00")
 
-    call_kwargs = container.query_items.call_args.kwargs
+    call_kwargs = memories.query_items.call_args.kwargs
     assert "c.created_at <= @created_before" in call_kwargs["query"]
     params = _params_by_name(call_kwargs)
     assert params["@created_before"] == "2026-03-01T00:00:00+00:00"
+
+
+def test_add_cosmos_routes_by_type():
+    turns = MagicMock()
+    memories = MagicMock()
+    summaries = MagicMock()
+    store = MemoryStore(containers=_containers(turns=turns, memories=memories, summaries=summaries))
+
+    for memory_type in ("turn", "fact", "episodic", "procedural", "thread_summary", "user_summary"):
+        store.add_cosmos(_doc(id=f"{memory_type}_id", type=memory_type))
+
+    assert turns.upsert_item.call_count == 1
+    assert memories.upsert_item.call_count == 3
+    assert summaries.upsert_item.call_count == 2
+    assert turns.upsert_item.call_args.kwargs["body"]["type"] == "turn"
+    assert {call.kwargs["body"]["type"] for call in memories.upsert_item.call_args_list} == {
+        "fact",
+        "episodic",
+        "procedural",
+    }
+    assert {call.kwargs["body"]["type"] for call in summaries.upsert_item.call_args_list} == {
+        "thread_summary",
+        "user_summary",
+    }
+
+
+def test_get_memories_queries_memories_container_only():
+    turns = MagicMock()
+    memories = MagicMock()
+    summaries = MagicMock()
+    memories.query_items.return_value = [_doc(id="f1", type="fact")]
+    store = MemoryStore(containers=_containers(turns=turns, memories=memories, summaries=summaries))
+
+    results = store.get_memories(user_id="u1", memory_types=["fact"])
+
+    assert [doc["id"] for doc in results] == ["f1"]
+    memories.query_items.assert_called_once()
+    turns.query_items.assert_not_called()
+    summaries.query_items.assert_not_called()
+
+
+def test_get_memories_default_types_include_all_memories_types():
+    memories = MagicMock()
+    memories.query_items.return_value = []
+    store = MemoryStore(containers=_containers(memories=memories))
+
+    store.get_memories(user_id="u1")
+
+    call_kwargs = memories.query_items.call_args.kwargs
+    params = _params_by_name(call_kwargs)
+    types = {params[k] for k in params if k.startswith("@memory_type_")}
+    assert types == {"fact", "episodic", "procedural"}
+
+
+def test_get_memories_rejects_non_memories_types():
+    store = MemoryStore(containers=_containers())
+
+    for bad in (["turn"], ["thread_summary"], ["user_summary"], ["unknown"], ["fact", "turn"]):
+        with pytest.raises(ValueError, match="memory_types must be a subset"):
+            store.get_memories(memory_types=bad)
+
+
+def test_get_thread_summary_queries_summaries_with_partition_key():
+    summaries = MagicMock()
+    summaries.query_items.return_value = [_doc(type="thread_summary", id="s1")]
+    store = MemoryStore(containers=_containers(summaries=summaries))
+
+    results = store.get_thread_summary("u1", "t1", recent_k=1)
+
+    assert [doc["id"] for doc in results] == ["s1"]
+    call_kwargs = summaries.query_items.call_args.kwargs
+    assert call_kwargs["partition_key"] == ["u1", "t1"]
+    assert "c.type = @type" in call_kwargs["query"]
+    assert "TOP @recent_k" in call_kwargs["query"]
+    params = _params_by_name(call_kwargs)
+    assert params["@type"] == "thread_summary"
+    assert params["@user_id"] == "u1"
+    assert params["@thread_id"] == "t1"

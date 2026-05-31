@@ -54,7 +54,8 @@ def _run_ticket_1(mem: CosmosMemoryClient, user_id: str, ticket: str) -> None:
         ("user", "I bought it in March 2024 from the Microsoft Store online."),
         ("agent", "Thanks. I'll check warranty status. Could you also confirm your email?"),
         ("user", "It's alex.chen@example.com. The order number was MS-78234."),
-        ("agent", "Verified — the device is under warranty. I've initiated a battery diagnostic. Please run the Surface app diagnostic."),
+        ("agent", "Verified — the device is under warranty. I've initiated a battery diagnostic. "
+                  "Please run the Surface app diagnostic."),
         ("user", "OK, will do. By the way, I work as a software engineer so I rely on this device daily."),
     ])
     _process_ticket(mem, user_id, ticket)
@@ -63,8 +64,10 @@ def _run_ticket_1(mem: CosmosMemoryClient, user_id: str, ticket: str) -> None:
 def _run_ticket_2(mem: CosmosMemoryClient, user_id: str, ticket: str) -> None:
     _banner(f"Ticket 2 ({ticket}) — accessory question")
     _add_dialogue(mem, user_id, ticket, [
-        ("user", "Hello again — Alex from the previous battery ticket. The Surface app says battery is degraded."),
-        ("agent", "Welcome back, Alex! Yes, that confirms the diagnostic. We'll ship a replacement battery service unit."),
+        ("user", "Hello again — Alex from the previous battery ticket. "
+                 "The Surface app says battery is degraded."),
+        ("agent", "Welcome back, Alex! Yes, that confirms the diagnostic. "
+                  "We'll ship a replacement battery service unit."),
         ("user", "Great. While we're talking, can you recommend a USB-C dock that works with the Surface Pro 9?"),
         ("agent", "The Surface Dock 2 or the Anker 778 are excellent choices for multi-monitor setups."),
         ("user", "Multi-monitor is exactly what I need — I run 3 displays for development work."),
@@ -104,7 +107,7 @@ def main() -> None:
         cosmos_endpoint=os.environ["COSMOS_DB_ENDPOINT"],
         cosmos_key=os.environ.get("COSMOS_DB_KEY") or None,
         cosmos_database=os.environ.get("COSMOS_DB_DATABASE", "ai_memory"),
-        cosmos_container=os.environ.get("COSMOS_DB_CONTAINER", "memories"),
+        cosmos_container=os.environ.get("COSMOS_DB_MEMORIES_CONTAINER", "memories"),
         ai_foundry_endpoint=os.environ["AI_FOUNDRY_ENDPOINT"],
         ai_foundry_api_key=os.environ.get("AI_FOUNDRY_API_KEY") or None,
         embedding_deployment_name=os.environ.get("AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME", "text-embedding-3-large"),
