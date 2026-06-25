@@ -12,6 +12,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 from ._container_routing import USER_SCOPED_MEMORIES_TYPES
 from ._query_builder import _QueryBuilder
@@ -171,6 +172,49 @@ def _resolve_embedding_dimensions(val: Optional[int]) -> int:
             parameter="embedding_dimensions",
         )
     return parsed
+
+
+_AI_FOUNDRY_PROJECT_PATH_RE = re.compile(r"/api/projects/[^/]+/?.*$", re.IGNORECASE)
+_AI_FOUNDRY_HOST_SUFFIX = ".services.ai.azure.com"
+
+
+def normalize_ai_foundry_endpoint(endpoint: Optional[str]) -> Optional[str]:
+    """Normalize an AI Foundry / Azure OpenAI endpoint to the inference base URL.
+
+    The toolkit reaches the model inference API through the OpenAI SDK
+    (``AzureOpenAI(azure_endpoint=...)``), which expects the account-level
+    inference endpoint, for example::
+
+        https://<resource>.services.ai.azure.com
+        https://<resource>.openai.azure.com
+
+    The Azure AI Foundry portal, however, commonly surfaces a *project*-scoped
+    endpoint of the form::
+
+        https://<resource>.services.ai.azure.com/api/projects/<project-name>
+
+    For ``*.services.ai.azure.com`` resources the project path lives on the same
+    host that serves inference, so this helper strips a trailing
+    ``/api/projects/<name>`` segment (plus any surrounding whitespace or trailing
+    slash) to recover the base inference endpoint. Callers can therefore paste
+    either form.
+
+    The project-path stripping is applied **only** when the URL host ends with
+    ``.services.ai.azure.com``, and only to the path component, so unrelated
+    endpoints that happen to contain ``/api/projects/...`` in their path are left
+    untouched. Endpoints that don't carry a project path are returned unchanged
+    aside from whitespace/trailing-slash trimming, so non-Foundry endpoints keep
+    working. ``None``/empty values are passed through untouched.
+    """
+    if not endpoint:
+        return endpoint
+    trimmed = endpoint.strip()
+    parts = urlsplit(trimmed)
+    host = parts.hostname or ""
+    if host.lower().endswith(_AI_FOUNDRY_HOST_SUFFIX):
+        new_path = _AI_FOUNDRY_PROJECT_PATH_RE.sub("", parts.path)
+        trimmed = urlunsplit((parts.scheme, parts.netloc, new_path, parts.query, parts.fragment))
+    return trimmed.rstrip("/")
 
 
 _ALLOWED_EMBEDDING_DATA_TYPES = ("float32", "uint8", "int8")
