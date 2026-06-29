@@ -146,7 +146,8 @@ def _resolve_embedding_dimensions(val: Optional[int]) -> int:
     """Resolve embedding dimensions from explicit value or ``AI_FOUNDRY_EMBEDDING_DIMENSIONS`` env var.
 
     Defaults to 1536 (the dimension we ship with for ``text-embedding-3-large``
-    truncated to 1536, which is the size DiskANN is tuned for in our containers).
+    truncated to 1536, which is the size our quantizedFlat vector indexes are
+    tuned for in our containers).
 
     Raises :class:`ConfigurationError` if the env var is set but cannot be
     parsed as a positive integer.
@@ -259,13 +260,15 @@ def _resolve_distance_function(val: Optional[str]) -> str:
 def _resolve_vector_index_type(val: Optional[str]) -> str:
     """Resolve vector index type from explicit value or ``AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE`` env var.
 
-    Defaults to ``diskANN``. Raises :class:`ConfigurationError` for unknown values.
+    Defaults to ``quantizedFlat``. Raises :class:`ConfigurationError` for unknown values.
 
-    ``diskANN`` requires the Cosmos DB account to have the DiskANN vector index
-    capability enabled. Accounts that do not (for example the classic Cosmos DB
-    emulator) can use ``quantizedFlat`` or ``flat`` instead.
+    ``quantizedFlat`` works on any Cosmos DB account (including the classic
+    emulator). ``diskANN`` requires the Cosmos DB account to have the DiskANN
+    vector index capability enabled; opt into it explicitly when available.
     """
-    raw = (val if val is not None else os.environ.get("AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE") or "diskANN").strip()
+    raw = (
+        val if val is not None else os.environ.get("AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE") or "quantizedFlat"
+    ).strip()
     if raw not in _ALLOWED_VECTOR_INDEX_TYPES:
         raise ConfigurationError(
             message=(
@@ -434,9 +437,15 @@ def _container_policies(
     embedding_data_type: str,
     distance_function: str,
     full_text_language: str,
-    vector_index_type: str = "diskANN",
+    include_salience_composite: bool = True,
+    vector_index_type: str = "quantizedFlat",
 ) -> tuple[dict, dict, dict]:
-    """Build the vector, indexing, and full-text policies for container creation."""
+    """Build the vector, indexing, and full-text policies for container creation.
+
+    ``include_salience_composite`` adds the ``(salience, created_at, id)``
+    composite index required by procedural synthesis on the MEMORIES container.
+    Turns reuse this builder with it disabled (turns are never synthesized).
+    """
     vector_embedding_policy = {
         "vectorEmbeddings": [
             {
@@ -451,25 +460,27 @@ def _container_policies(
     indexing_policy = {
         "includedPaths": [{"path": "/*"}],
         "excludedPaths": [
-            {"path": "/embedding/*"},
             {"path": "/source_memory_ids/*"},
             {"path": "/supersedes_ids/*"},
+            {"path": '/"_etag"/?'},
         ],
         "vectorIndexes": [{"path": "/embedding", "type": vector_index_type}],
         "fullTextIndexes": [{"path": "/content"}],
+    }
+
+    if include_salience_composite:
         # Procedural synthesis selects TOP N by (salience DESC, created_at ASC, id ASC).
         # Cosmos requires a composite index for multi-property ORDER BY; without it the
         # query returns a non-deterministic 50 of N when many docs share the default
         # salience (0.5), which makes the source-id short-circuit in synthesize_procedural
         # thrash and burn LLM calls on every reconcile.
-        "compositeIndexes": [
+        indexing_policy["compositeIndexes"] = [
             [
                 {"path": "/salience", "order": "descending"},
                 {"path": "/created_at", "order": "ascending"},
                 {"path": "/id", "order": "ascending"},
             ]
-        ],
-    }
+        ]
 
     full_text_policy = {
         "defaultLanguage": full_text_language,

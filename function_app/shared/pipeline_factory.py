@@ -73,7 +73,10 @@ def get_pipeline():
         ContainerKey.MEMORIES: memories_container,
         ContainerKey.SUMMARIES: summaries_container,
     }
-    store = MemoryStore(containers=containers, embeddings_client=embeddings)
+    store = MemoryStore(
+        containers=containers,
+        embeddings_client=embeddings,
+    )
     _pipeline = PipelineService(
         store,
         chat,

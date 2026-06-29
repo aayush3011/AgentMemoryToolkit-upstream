@@ -63,7 +63,7 @@ param chatDeploymentName string = ''
 @description('Azure OpenAI REST API version pinned for both chat and embedding clients (SDK + function-app). Newer preview versions are required for strict JSON-schema response_format on gpt-5.x models.')
 param azureOpenAiApiVersion string = '2024-12-01-preview'
 
-@description('Embedding output dimensions. MUST equal the dimensions configured on the Cosmos memories container vectorEmbeddingPolicy. text-embedding-3-large natively returns 3072; we set 1536 here so DiskANN (also 1536 in cosmos.bicep) can match. Change this only if you also change cosmos.bicep.')
+@description('Embedding output dimensions. MUST equal the dimensions configured on the Cosmos memories container vectorEmbeddingPolicy. text-embedding-3-large natively returns 3072; we set 1536 here so the quantizedFlat vector indexes (also 1536 in cosmos.bicep) can match. Change this only if you also change cosmos.bicep.')
 param embeddingDimensions int = 1536
 
 @description('Run thread-summary orchestration every N turns within a (user_id, thread_id). 0 = disabled.')

@@ -360,8 +360,12 @@ class TestCreateMemoryStore:
         turns_call = mock_db.create_container_if_not_exists.await_args_list[1]
         assert turns_call.kwargs["id"] == "memories_turns"
         assert turns_call.kwargs["default_ttl"] == 2_592_000
-        assert "vector_embedding_policy" not in turns_call.kwargs
-        assert "full_text_policy" not in turns_call.kwargs
+        # The turns container is always provisioned with a vector index + full-text
+        # policy so it is primed for search_turns() even when turn
+        # embeddings are disabled. Vector indexes use quantizedFlat.
+        assert "vector_embedding_policy" in turns_call.kwargs
+        assert "full_text_policy" in turns_call.kwargs
+        assert turns_call.kwargs["indexing_policy"]["vectorIndexes"][0]["type"] == "quantizedFlat"
         assert mem._turns_container_client is mock_turns_container
 
     async def test_create_memory_store_defaults_to_serverless(self):
@@ -752,6 +756,22 @@ class TestSearchCosmos:
         query = container.query_items.call_args.kwargs["query"]
         assert "RRF" in query
         assert "FullTextScore" in query
+
+    async def test_search_turns(self):
+        mem, container = _connected_client()
+        turns = mem._turns_container_client
+        turns.query_items = MagicMock(return_value=AsyncIterator([_make_doc()]))
+
+        mem._embeddings_client = AsyncMock()
+        mem._embeddings_client.generate = AsyncMock(return_value=[0.1, 0.2, 0.3])
+
+        results = await mem.search_turns(search_terms="weather", user_id="u1", thread_id="t1", top_k=3)
+
+        assert len(results) == 1
+        mem._embeddings_client.generate.assert_awaited_once_with("weather")
+        turns.query_items.assert_called_once()
+        container.query_items.assert_not_called()
+        assert "VectorDistance" in turns.query_items.call_args.kwargs["query"]
 
     async def test_search_not_connected(self):
         mem = _make_client()

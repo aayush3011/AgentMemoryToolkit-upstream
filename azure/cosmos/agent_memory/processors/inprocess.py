@@ -48,7 +48,10 @@ class InProcessProcessor:
                 ContainerKey.MEMORIES: cosmos_container,
                 ContainerKey.SUMMARIES: summaries_container,
             }
-            store = MemoryStore(containers=containers, embeddings_client=embeddings_client)
+            store = MemoryStore(
+                containers=containers,
+                embeddings_client=embeddings_client,
+            )
             pipeline = PipelineService(store, chat_client, embeddings_client, containers=containers)
 
         self._pipeline = pipeline

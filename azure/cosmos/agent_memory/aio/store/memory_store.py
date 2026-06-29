@@ -41,6 +41,7 @@ from azure.cosmos.agent_memory.store._search_helpers import (
     top_literal,
 )
 from azure.cosmos.agent_memory.store.memory_store import (
+    _TURN_PROJECTION,
     _validate_taggable_type,
     _validated_memories_types,
     _wrap_cosmos_exception,
@@ -58,12 +59,14 @@ class AsyncMemoryStore:
         *,
         containers: dict[ContainerKey, Any],
         embeddings_client: Any = None,
+        enable_turn_embeddings: bool = False,
     ) -> None:
         self._containers = containers
         self._turns_container = containers[ContainerKey.TURNS]
         self._memories_container = containers[ContainerKey.MEMORIES]
         self._summaries_container = containers[ContainerKey.SUMMARIES]
         self._embeddings_client = embeddings_client
+        self._enable_turn_embeddings = enable_turn_embeddings
 
     @property
     def container(self) -> Any:
@@ -199,7 +202,7 @@ class AsyncMemoryStore:
         body = record.to_cosmos_dict()
 
         if embed is None:
-            embed = memory_type != "turn"
+            embed = memory_type != "turn" or self._enable_turn_embeddings
         if embedding is not None:
             body["embedding"] = embedding
         elif embed and content and self._embeddings_client is not None:
@@ -242,7 +245,8 @@ class AsyncMemoryStore:
             to_embed_idx: list[int] = []
             to_embed_text: list[str] = []
             for i, body in enumerate(bodies):
-                if body.get("type") != "turn" and body.get("content") and not body.get("embedding"):
+                embeddable_type = body.get("type") != "turn" or self._enable_turn_embeddings
+                if embeddable_type and body.get("content") and not body.get("embedding"):
                     to_embed_idx.append(i)
                     to_embed_text.append(body["content"])
             if to_embed_text and self._embeddings_client is not None:
@@ -489,7 +493,7 @@ class AsyncMemoryStore:
         if not include_superseded:
             qb.add_is_null_or_undefined("c.superseded_by")
 
-        query = f"SELECT * FROM c{qb.build_where()} ORDER BY c.created_at DESC"
+        query = f"SELECT {_TURN_PROJECTION} FROM c{qb.build_where()} ORDER BY c.created_at DESC"
         logger.debug("async get_thread query: %s", query)
         items = await self._query_items(
             query=query,
@@ -812,7 +816,11 @@ class AsyncMemoryStore:
         *,
         query: Optional[str] = None,
     ) -> list[dict[str, Any]]:
-        """Search memories using vector similarity with optional full-text hybrid ranking."""
+        """Search memories using vector similarity with optional full-text hybrid ranking.
+
+        Searches the derived memories container (facts/episodic/procedural). Use
+        :meth:`search_turns` to vector-search the raw conversation log instead.
+        """
         terms = require_search_terms(search_terms, query)
         _validate_hybrid_search(hybrid_search, terms)
         top = top_literal(top_k, name="top_k")
@@ -850,6 +858,62 @@ class AsyncMemoryStore:
             sql,
             parameters,
             container_key=ContainerKey.MEMORIES,
+            partition_key=partition_key,
+        )
+
+    async def search_turns(
+        self,
+        search_terms: Optional[str] = None,
+        thread_id: Optional[str] = None,
+        role: Optional[str] = None,
+        hybrid_search: bool = False,
+        top_k: int = 5,
+        tags_all: Optional[list[str]] = None,
+        tags_any: Optional[list[str]] = None,
+        exclude_tags: Optional[list[str]] = None,
+        created_after: Optional[str | datetime] = None,
+        created_before: Optional[str | datetime] = None,
+        *,
+        user_id: str,
+        query: Optional[str] = None,
+    ) -> list[dict[str, Any]]:
+        """Search raw conversation turns using vector similarity with optional hybrid ranking.
+
+        Turns are strictly thread-scoped and only vector-searchable when turn
+        embeddings were enabled at write time (see ``enable_turn_embeddings``).
+        ``user_id`` is required so the query is scoped to a single partition
+        instead of a cross-partition scan over every user's raw turns.
+        """
+        terms = require_search_terms(search_terms, query)
+        _validate_hybrid_search(hybrid_search, terms)
+        top = top_literal(top_k, name="top_k")
+        query_vector = await self._embed(terms)
+
+        qb = _QueryBuilder()
+        qb.add_filter("c.user_id", "@user_id", user_id)
+        qb.add_filter("c.thread_id", "@thread_id", thread_id)
+        qb.add_filter("c.role", "@role", role)
+        add_tag_filters(qb, tags_all=tags_all, tags_any=tags_any, exclude_tags=exclude_tags)
+        qb.add_time_range(
+            "c.created_at",
+            after=_coerce_datetime_iso(created_after),
+            before=_coerce_datetime_iso(created_before),
+            after_param="@created_after",
+            before_param="@created_before",
+        )
+
+        sql = build_search_sql(qb=qb, top=top, hybrid_search=hybrid_search, include_superseded=False)
+        parameters = qb.get_parameters()
+        parameters.append({"name": "@embedding", "value": query_vector})
+        if hybrid_search:
+            parameters.append({"name": "@key_terms", "value": terms})
+
+        partition_key, _ = query_scope(user_id, thread_id)
+        logger.debug("AsyncMemoryStore.search_turns query: %s", sql)
+        return await self.query(
+            sql,
+            parameters,
+            container_key=ContainerKey.TURNS,
             partition_key=partition_key,
         )
 
