@@ -314,6 +314,28 @@ def test_apply_inplace_update_shorter_restatement_keeps_richer_content() -> None
     assert p._apply_inplace_update(neighbor, new_doc) is False
 
 
+def test_apply_inplace_update_skips_cross_source_fold() -> None:
+    p = _make_pipeline()
+    neighbor = _doc(
+        "existing-1",
+        "same content",
+        tags=["sys:fact"],
+        metadata={"category": "preference", "source": "user"},
+    )
+    neighbor["_etag"] = "etag-xyz"
+    new_doc = _doc(
+        "f-new",
+        "same content",
+        embedding=[0.5, 0.5],
+        tags=["sys:fact", "sys:agent-fact"],
+        metadata={"category": "other", "source": "agent"},
+    )
+
+    assert p._apply_inplace_update(neighbor, new_doc) is False
+    p._memories_container.replace_item.assert_not_called()
+    p._memories_container.upsert_item.assert_not_called()
+
+
 def test_nearest_active_full_returns_full_doc_and_skips_excluded() -> None:
     p = _make_pipeline()
     doc_a = _doc("a", "first")

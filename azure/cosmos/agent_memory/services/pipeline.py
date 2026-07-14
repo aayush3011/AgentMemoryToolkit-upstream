@@ -671,7 +671,14 @@ class PipelineService:
             seed = _ID_SEED_SEP.join((user_id, thread_id, new_content_hash))
             det_id = f"fact_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
             topic_tags = build_topic_tags(fact.get("tags", []))
-            fact_source = fact.get("source") if fact.get("source") in ("user", "agent") else "user"
+            raw_source = fact.get("source")
+            if raw_source is not None and raw_source not in ("user", "agent"):
+                logger.debug(
+                    "extract_memories: coercing invalid fact source=%r to 'user' user_id=%s",
+                    raw_source,
+                    user_id,
+                )
+            fact_source = raw_source if raw_source in ("user", "agent") else "user"
             source_tags = ["sys:agent-fact"] if fact_source == "agent" else []
             confidence = fact.get("confidence")
             doc: dict[str, Any] = {
@@ -979,9 +986,27 @@ class PipelineService:
         Recency wins: the neighbor keeps its id / created_at / partition but takes
         the new doc's content + embedding, unions tags, and takes the max
         salience/confidence.
+
+        Folds only happen within the same ``metadata.source`` (user vs agent): an
+        agent action and a user statement are distinct records even when their
+        embeddings are near-identical, so folding across sources would corrupt
+        attribution (tag/source desync, content swap). Cross-source pairs return
+        False and the caller keeps the new doc as a novel ADD.
         """
         from azure.core import MatchConditions
         from azure.cosmos.exceptions import CosmosAccessConditionFailedError
+
+        neighbor_source = (neighbor.get("metadata") or {}).get("source") or "user"
+        new_source = (new_doc.get("metadata") or {}).get("source") or "user"
+        if neighbor_source != new_source:
+            logger.info(
+                "in-place dedup update skipped (source mismatch neighbor=%s new=%s) "
+                "target_id=%s; keeping new doc as novel",
+                neighbor_source,
+                new_source,
+                neighbor.get("id"),
+            )
+            return False
 
         try:
             old_etag = neighbor.get("_etag")
@@ -1819,11 +1844,16 @@ class PipelineService:
         # physical partitions and matches the dedup prompt's tiebreaker
         # ("more recent created_at first"). Cosmos's _ts is the last-write
         # timestamp, which would diverge from created_at after any UPDATE.
+        #
+        # Agent-sourced facts (sys:agent-fact) are excluded: they record what the
+        # agent did/recommended (historical events), not mutable user state, so
+        # they must never be contradiction-superseded by a later user statement.
         query = (
             f"SELECT TOP {top_literal(n, name='reconcile_memories.n')} * FROM c "
             "WHERE c.user_id = @user_id "
             "AND c.type = @memory_type "
             f"AND {_ACTIVE_DOC_FILTER} "
+            "AND NOT ARRAY_CONTAINS(c.tags, 'sys:agent-fact') "
             "ORDER BY c.created_at DESC"
         )
         return list(

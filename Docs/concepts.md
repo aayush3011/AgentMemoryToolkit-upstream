@@ -96,6 +96,10 @@ Facts work especially well for vector search because each fact is stored as a sm
 
 By default raw conversation turns are *not* embedded — only derived memories (facts, episodic, procedural, summaries) carry vectors. Set `enable_turn_embeddings=True` (env `ENABLE_TURN_EMBEDDINGS`) to also embed turns on write, then call `search_turns()` to vector-search the raw conversation log. The turns container is always provisioned with a `quantizedFlat` vector index, so this flag only toggles embedding generation and can be turned on or off at any time without recreating the container.
 
+### Unified retrieval (`include_turns`)
+
+`search_cosmos(..., include_turns=True)` returns extracted memories plus raw conversation turns in one call — useful for recovering detail that extraction dropped. Up to `turn_top_k` turns (default `top_k`) are **appended after** the memory hits, so memory results keep priority; the two sets are not score-fused. A turn is skipped only when its content is an **exact** string match of a returned memory — paraphrased overlaps are not de-duplicated. The turn search requires `enable_turn_embeddings` and is best-effort: if it fails, the memory results are returned unchanged.
+
 ---
 
 ## Processing Pipeline

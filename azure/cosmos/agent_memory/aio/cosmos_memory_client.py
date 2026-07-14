@@ -722,8 +722,9 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         include_turns: bool = False,
         turn_top_k: Optional[int] = None,
     ) -> list[dict[str, Any]]:
-        """Search memories in Cosmos DB using vector similarity."""
-        results = await self._get_store().search(
+        """Search memories using vector similarity; optionally blend raw turns."""
+        store = self._get_store()
+        results = await store.search(
             search_terms=search_terms,
             memory_id=memory_id,
             user_id=user_id,
@@ -745,7 +746,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
 
         seen_content = {str(r.get("content") or "").strip() for r in results}
         try:
-            turns = await self._get_store().search_turns(
+            turns = await store.search_turns(
                 search_terms=search_terms,
                 user_id=user_id,
                 thread_id=thread_id,

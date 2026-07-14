@@ -609,7 +609,14 @@ class AsyncPipelineService:
             seed = _ID_SEED_SEP.join((user_id, thread_id, new_content_hash))
             det_id = f"fact_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
             topic_tags = build_topic_tags(fact.get("tags", []))
-            fact_source = fact.get("source") if fact.get("source") in ("user", "agent") else "user"
+            raw_source = fact.get("source")
+            if raw_source is not None and raw_source not in ("user", "agent"):
+                logger.debug(
+                    "extract_memories: coercing invalid fact source=%r to 'user' user_id=%s",
+                    raw_source,
+                    user_id,
+                )
+            fact_source = raw_source if raw_source in ("user", "agent") else "user"
             source_tags = ["sys:agent-fact"] if fact_source == "agent" else []
             confidence = fact.get("confidence")
             doc: dict[str, Any] = {
@@ -865,9 +872,26 @@ class AsyncPipelineService:
         return None, 0.0
 
     async def _apply_inplace_update(self, neighbor: dict[str, Any], new_doc: dict[str, Any]) -> bool:
-        """Async mirror of the sync in-place refresh (recency-wins content+embedding)."""
+        """Async mirror of the sync in-place refresh (recency-wins content+embedding).
+
+        Folds only within the same ``metadata.source`` (user vs agent); a
+        cross-source pair returns False so the caller keeps it as a novel ADD,
+        preventing tag/source desync.
+        """
         from azure.core import MatchConditions
         from azure.cosmos.exceptions import CosmosAccessConditionFailedError
+
+        neighbor_source = (neighbor.get("metadata") or {}).get("source") or "user"
+        new_source = (new_doc.get("metadata") or {}).get("source") or "user"
+        if neighbor_source != new_source:
+            logger.info(
+                "in-place dedup update skipped (source mismatch neighbor=%s new=%s) "
+                "target_id=%s; keeping new doc as novel",
+                neighbor_source,
+                new_source,
+                neighbor.get("id"),
+            )
+            return False
 
         try:
             old_etag = neighbor.get("_etag")
@@ -1568,11 +1592,15 @@ class AsyncPipelineService:
 
     async def _active_memories_for_reconcile(self, user_id: str, memory_type: str, n: int) -> list[dict[str, Any]]:
         capped_n = top_literal(n, name="reconcile_memories.n")
+        # Agent-sourced facts (sys:agent-fact) are excluded: they record what the
+        # agent did/recommended (historical events), not mutable user state, so
+        # they must never be contradiction-superseded by a later user statement.
         query = (
             f"SELECT TOP {capped_n} * FROM c "
             "WHERE c.user_id = @user_id "
             "AND c.type = @memory_type "
             f"AND {_ACTIVE_DOC_FILTER} "
+            "AND NOT ARRAY_CONTAINS(c.tags, 'sys:agent-fact') "
             "ORDER BY c.created_at DESC"
         )
         return await self._query_items(

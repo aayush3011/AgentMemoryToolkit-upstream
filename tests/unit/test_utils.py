@@ -448,3 +448,47 @@ def test_build_cosmos_user_agent_suffixes_toolkit_behind_custom():
     assert result == f"MyApp/1.2.3 {COSMOS_USER_AGENT}"
     assert result.startswith("MyApp/1.2.3 ")
     assert result.endswith(COSMOS_USER_AGENT)
+
+
+class TestNormalizeCreatedAtIso:
+    def test_none_passthrough(self):
+        from azure.cosmos.agent_memory._utils import normalize_created_at_iso
+
+        assert normalize_created_at_iso(None) is None
+
+    def test_naive_datetime_assumed_utc(self):
+        from datetime import datetime
+
+        from azure.cosmos.agent_memory._utils import normalize_created_at_iso
+
+        out = normalize_created_at_iso(datetime(2024, 3, 1, 12, 0, 0))
+        assert out == "2024-03-01T12:00:00+00:00"
+
+    def test_aware_datetime_converted_to_utc(self):
+        from datetime import datetime, timedelta, timezone
+
+        from azure.cosmos.agent_memory._utils import normalize_created_at_iso
+
+        # 09:00 at -03:00 == 12:00 UTC
+        dt = datetime(2024, 3, 1, 9, 0, 0, tzinfo=timezone(timedelta(hours=-3)))
+        assert normalize_created_at_iso(dt) == "2024-03-01T12:00:00+00:00"
+
+    def test_offsetless_string_assumed_utc(self):
+        from azure.cosmos.agent_memory._utils import normalize_created_at_iso
+
+        assert normalize_created_at_iso("2024-03-01T12:00:00") == "2024-03-01T12:00:00+00:00"
+
+    def test_z_suffix_and_offset_normalized_to_utc(self):
+        from azure.cosmos.agent_memory._utils import normalize_created_at_iso
+
+        assert normalize_created_at_iso("2024-03-01T12:00:00Z") == "2024-03-01T12:00:00+00:00"
+        assert normalize_created_at_iso("2024-03-01T09:00:00-03:00") == "2024-03-01T12:00:00+00:00"
+
+    def test_invalid_string_raises(self):
+        from azure.cosmos.agent_memory._utils import normalize_created_at_iso
+        from azure.cosmos.agent_memory.exceptions import ValidationError
+
+        with pytest.raises(ValidationError):
+            normalize_created_at_iso("not-a-date")
+        with pytest.raises(ValidationError):
+            normalize_created_at_iso("")

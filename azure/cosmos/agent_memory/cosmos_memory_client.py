@@ -677,8 +677,9 @@ class CosmosMemoryClient(_BaseMemoryClient):
         include_turns: bool = False,
         turn_top_k: Optional[int] = None,
     ) -> list[dict[str, Any]]:
-        """Search memories in Cosmos DB using vector similarity."""
-        results = self._get_store().search(
+        """Search memories using vector similarity; optionally blend raw turns."""
+        store = self._get_store()
+        results = store.search(
             search_terms=search_terms,
             memory_id=memory_id,
             user_id=user_id,
@@ -700,7 +701,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
 
         seen_content = {str(r.get("content") or "").strip() for r in results}
         try:
-            turns = self._get_store().search_turns(
+            turns = store.search_turns(
                 search_terms=search_terms,
                 user_id=user_id,
                 thread_id=thread_id,

@@ -262,6 +262,26 @@ async def test_apply_inplace_update_etag_conflict_returns_false():
 
 
 @pytest.mark.asyncio
+async def test_apply_inplace_update_skips_cross_source_fold():
+    p = _service()
+    p._replace_item = AsyncMock()
+    neighbor = _fact(
+        "existing-1", "same content", tags=["sys:fact"], metadata={"category": "preference", "source": "user"}
+    )
+    neighbor["_etag"] = "etag-xyz"
+    new_doc = _fact(
+        "f-new",
+        "same content",
+        embedding=[0.5, 0.5],
+        tags=["sys:fact", "sys:agent-fact"],
+        metadata={"category": "other", "source": "agent"},
+    )
+
+    assert await p._apply_inplace_update(neighbor, new_doc) is False
+    p._replace_item.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_nearest_active_full_returns_full_doc_and_skips_excluded():
     p = _service()
     doc_a = _fact("a", "first")

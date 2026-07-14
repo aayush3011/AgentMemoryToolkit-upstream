@@ -20,6 +20,7 @@ from azure.cosmos.agent_memory._utils import (
     compute_content_hash,
     extract_keywords,
     new_id,
+    normalize_created_at_iso,
 )
 from azure.cosmos.agent_memory.exceptions import (
     ConfigurationError,
@@ -187,7 +188,7 @@ class AsyncMemoryStore:
         if salience is not None:
             kwargs["salience"] = salience
         if created_at is not None:
-            kwargs["created_at"] = created_at.isoformat() if isinstance(created_at, datetime) else created_at
+            kwargs["created_at"] = normalize_created_at_iso(created_at)
         if memory_type != "turn":
             kwargs.setdefault("content_hash", compute_content_hash(content))
             kwargs.setdefault("prompt_id", "manual:add")
