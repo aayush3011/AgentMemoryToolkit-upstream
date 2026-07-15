@@ -108,6 +108,29 @@ def _coerce_datetime_iso(value: Optional[str | datetime]) -> Optional[str]:
     return value
 
 
+def normalize_created_at_iso(value: Optional[str | datetime]) -> Optional[str]:
+    """Normalize a caller-supplied event time to a tz-aware **UTC** ISO-8601 string."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        if not text:
+            raise ValidationError("created_at must be a non-empty ISO-8601 string or datetime")
+        try:
+            # ``fromisoformat`` doesn't accept a trailing 'Z' before 3.11 in all
+            # forms; normalize it to an explicit UTC offset first.
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValidationError(f"created_at is not a valid ISO-8601 timestamp: {value!r}") from exc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.isoformat()
+
+
 def _normalize_for_hash(text: str) -> str:
     """Lowercase + collapse whitespace for write-time exact-dedup.
 

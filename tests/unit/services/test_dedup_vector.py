@@ -4,7 +4,17 @@ import json
 from typing import Any
 from unittest.mock import MagicMock
 
+import pytest
+
 from azure.cosmos.agent_memory.services.pipeline import PipelineService
+
+
+@pytest.fixture(autouse=True)
+def _enable_vector_folding(monkeypatch: pytest.MonkeyPatch) -> None:
+    # DEDUP_VECTOR_ENABLED now defaults to False (add-only); this suite exercises
+    # the in-place folding path, so enable it. Tests that assert the flag-off
+    # behavior patch the getter directly and override this.
+    monkeypatch.setenv("DEDUP_VECTOR_ENABLED", "true")
 
 
 def _make_pipeline() -> PipelineService:
@@ -302,6 +312,28 @@ def test_apply_inplace_update_shorter_restatement_keeps_richer_content() -> None
     new_doc = _doc("f-new", "old restated", embedding=[0.5, 0.5], tags=["sys:fact"])
 
     assert p._apply_inplace_update(neighbor, new_doc) is False
+
+
+def test_apply_inplace_update_skips_cross_source_fold() -> None:
+    p = _make_pipeline()
+    neighbor = _doc(
+        "existing-1",
+        "same content",
+        tags=["sys:fact"],
+        metadata={"category": "preference", "source": "user"},
+    )
+    neighbor["_etag"] = "etag-xyz"
+    new_doc = _doc(
+        "f-new",
+        "same content",
+        embedding=[0.5, 0.5],
+        tags=["sys:fact", "sys:agent-fact"],
+        metadata={"category": "other", "source": "agent"},
+    )
+
+    assert p._apply_inplace_update(neighbor, new_doc) is False
+    p._memories_container.replace_item.assert_not_called()
+    p._memories_container.upsert_item.assert_not_called()
 
 
 def test_nearest_active_full_returns_full_doc_and_skips_excluded() -> None:

@@ -398,6 +398,7 @@ class AsyncPipelineService:
         items: list[dict[str, Any]],
         *,
         group_by_thread: bool = False,
+        include_timestamp: bool = False,
     ) -> str:
         # getattr fallback covers unit tests that build AsyncPipelineService
         # via __new__ to bypass __init__ (and therefore the metadata-keys stash).
@@ -405,6 +406,7 @@ class AsyncPipelineService:
             items,
             group_by_thread=group_by_thread,
             metadata_keys=getattr(self, "_transcript_metadata_keys", None),
+            include_timestamp=include_timestamp,
         )
 
     async def _load_existing_memories(
@@ -547,7 +549,7 @@ class AsyncPipelineService:
         deferred_turn_count = 0
         quarantined_turn_count = 0
         for batch in batches:
-            batch_transcript = self._build_transcript(batch)
+            batch_transcript = self._build_transcript(batch, include_timestamp=True)
             try:
                 response_text = await self._run_prompty(
                     "extract_memories.prompty", inputs={"transcript": batch_transcript}
@@ -607,6 +609,15 @@ class AsyncPipelineService:
             seed = _ID_SEED_SEP.join((user_id, thread_id, new_content_hash))
             det_id = f"fact_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
             topic_tags = build_topic_tags(fact.get("tags", []))
+            raw_source = fact.get("source")
+            if raw_source is not None and raw_source not in ("user", "agent"):
+                logger.debug(
+                    "extract_memories: coercing invalid fact source=%r to 'user' user_id=%s",
+                    raw_source,
+                    user_id,
+                )
+            fact_source = raw_source if raw_source in ("user", "agent") else "user"
+            source_tags = ["sys:agent-fact"] if fact_source == "agent" else []
             confidence = fact.get("confidence")
             doc: dict[str, Any] = {
                 "id": det_id,
@@ -621,9 +632,10 @@ class AsyncPipelineService:
                 "metadata": {
                     "category": fact.get("category") or "other",
                     "temporal_context": fact.get("temporal_context"),
+                    "source": fact_source,
                 },
                 "salience": fact.get("salience") if fact.get("salience") is not None else 0.5,
-                "tags": ["sys:fact", "sys:auto-extracted"] + topic_tags,
+                "tags": ["sys:fact", "sys:auto-extracted"] + source_tags + topic_tags,
                 "created_at": doc_timestamp,
                 "updated_at": doc_timestamp,
             }
@@ -860,9 +872,26 @@ class AsyncPipelineService:
         return None, 0.0
 
     async def _apply_inplace_update(self, neighbor: dict[str, Any], new_doc: dict[str, Any]) -> bool:
-        """Async mirror of the sync in-place refresh (recency-wins content+embedding)."""
+        """Async mirror of the sync in-place refresh (recency-wins content+embedding).
+
+        Folds only within the same ``metadata.source`` (user vs agent); a
+        cross-source pair returns False so the caller keeps it as a novel ADD,
+        preventing tag/source desync.
+        """
         from azure.core import MatchConditions
         from azure.cosmos.exceptions import CosmosAccessConditionFailedError
+
+        neighbor_source = (neighbor.get("metadata") or {}).get("source") or "user"
+        new_source = (new_doc.get("metadata") or {}).get("source") or "user"
+        if neighbor_source != new_source:
+            logger.info(
+                "in-place dedup update skipped (source mismatch neighbor=%s new=%s) "
+                "target_id=%s; keeping new doc as novel",
+                neighbor_source,
+                new_source,
+                neighbor.get("id"),
+            )
+            return False
 
         try:
             old_etag = neighbor.get("_etag")
@@ -1563,11 +1592,15 @@ class AsyncPipelineService:
 
     async def _active_memories_for_reconcile(self, user_id: str, memory_type: str, n: int) -> list[dict[str, Any]]:
         capped_n = top_literal(n, name="reconcile_memories.n")
+        # Agent-sourced facts (sys:agent-fact) are excluded: they record what the
+        # agent did/recommended (historical events), not mutable user state, so
+        # they must never be contradiction-superseded by a later user statement.
         query = (
             f"SELECT TOP {capped_n} * FROM c "
             "WHERE c.user_id = @user_id "
             "AND c.type = @memory_type "
             f"AND {_ACTIVE_DOC_FILTER} "
+            "AND NOT ARRAY_CONTAINS(c.tags, 'sys:agent-fact') "
             "ORDER BY c.created_at DESC"
         )
         return await self._query_items(

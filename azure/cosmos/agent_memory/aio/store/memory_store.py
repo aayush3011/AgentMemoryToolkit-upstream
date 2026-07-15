@@ -20,6 +20,7 @@ from azure.cosmos.agent_memory._utils import (
     compute_content_hash,
     extract_keywords,
     new_id,
+    normalize_created_at_iso,
 )
 from azure.cosmos.agent_memory.exceptions import (
     ConfigurationError,
@@ -168,6 +169,7 @@ class AsyncMemoryStore:
         salience: Optional[float] = None,
         embedding: Optional[list[float]] = None,
         embed: Optional[bool] = None,
+        created_at: Optional[str | datetime] = None,
     ) -> str:
         """Add a memory document to Cosmos DB and return its id."""
         kwargs: dict[str, Any] = {
@@ -185,6 +187,8 @@ class AsyncMemoryStore:
             kwargs["ttl"] = ttl
         if salience is not None:
             kwargs["salience"] = salience
+        if created_at is not None:
+            kwargs["created_at"] = normalize_created_at_iso(created_at)
         if memory_type != "turn":
             kwargs.setdefault("content_hash", compute_content_hash(content))
             kwargs.setdefault("prompt_id", "manual:add")

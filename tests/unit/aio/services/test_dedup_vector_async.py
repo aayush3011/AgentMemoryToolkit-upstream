@@ -9,6 +9,14 @@ import pytest
 from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
 
 
+@pytest.fixture(autouse=True)
+def _enable_vector_folding(monkeypatch: pytest.MonkeyPatch) -> None:
+    # DEDUP_VECTOR_ENABLED now defaults to False (add-only); this suite exercises
+    # the in-place folding path, so enable it. Tests that assert the flag-off
+    # behavior patch the getter directly and override this.
+    monkeypatch.setenv("DEDUP_VECTOR_ENABLED", "true")
+
+
 def _service() -> AsyncPipelineService:
     p = AsyncPipelineService.__new__(AsyncPipelineService)
     p._memories_container = MagicMock()
@@ -251,6 +259,26 @@ async def test_apply_inplace_update_etag_conflict_returns_false():
     new_doc = _fact("f-new", "old restated", embedding=[0.5, 0.5], tags=["sys:fact"])
 
     assert await p._apply_inplace_update(neighbor, new_doc) is False
+
+
+@pytest.mark.asyncio
+async def test_apply_inplace_update_skips_cross_source_fold():
+    p = _service()
+    p._replace_item = AsyncMock()
+    neighbor = _fact(
+        "existing-1", "same content", tags=["sys:fact"], metadata={"category": "preference", "source": "user"}
+    )
+    neighbor["_etag"] = "etag-xyz"
+    new_doc = _fact(
+        "f-new",
+        "same content",
+        embedding=[0.5, 0.5],
+        tags=["sys:fact", "sys:agent-fact"],
+        metadata={"category": "other", "source": "agent"},
+    )
+
+    assert await p._apply_inplace_update(neighbor, new_doc) is False
+    p._replace_item.assert_not_awaited()
 
 
 @pytest.mark.asyncio
