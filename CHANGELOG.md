@@ -1,6 +1,6 @@
 ## Release History
 
-## [0.3.0b1] (Unreleased)
+## [0.3.0b1] (2026-07-24)
 
 #### Features Added
 * Searchable summaries: the summaries container now carries a vector index, and `search_summaries()` / `search_cosmos(include_summaries=True)` vector-search across a user's thread + user summaries. See [PR:#34](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/34)
