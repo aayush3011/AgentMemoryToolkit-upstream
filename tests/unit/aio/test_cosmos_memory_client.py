@@ -888,7 +888,8 @@ class TestSearchCosmos:
     async def test_search_episodic_forwards_search_options(self):
         containers = {key: MagicMock() for key in ContainerKey}
         store = AsyncMemoryStore(containers=containers)
-        store.search = AsyncMock(return_value=[])
+        store.query = AsyncMock(return_value=[])
+        store._embed = AsyncMock(return_value=[0.1])
 
         await store.search_episodic(
             user_id="u1",
@@ -898,14 +899,10 @@ class TestSearchCosmos:
             include_superseded=True,
         )
 
-        store.search.assert_awaited_once_with(
-            search_terms="weather",
-            user_id="u1",
-            memory_types=["episodic"],
-            top_k=2,
-            min_salience=0.4,
-            include_superseded=True,
-        )
+        query, parameters = store.query.await_args.args[:2]
+        assert "c.type = @type" in query
+        assert "VectorDistance(c.embedding, @embedding)" in query
+        assert {"name": "@type", "value": "episodic"} in parameters
 
     async def test_build_episodic_context_forwards_search_options(self):
         containers = {key: MagicMock() for key in ContainerKey}

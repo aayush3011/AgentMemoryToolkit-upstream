@@ -94,8 +94,13 @@ class FakeStore:
             docs = [doc for doc in docs if doc.get("metadata", {}).get("predicate") == params["@predicate"]]
         if "superseded_by" in sql:
             docs = [doc for doc in docs if not doc.get("superseded_by")]
-        if "IS_DEFINED(c.metadata.lesson)" in sql:
-            docs = [doc for doc in docs if doc.get("metadata", {}).get("lesson")]
+        if "IS_DEFINED(c.lessons)" in sql:
+            docs = [
+                doc
+                for doc in docs
+                if isinstance(doc.get("lessons"), list)
+                and any(isinstance(lesson, str) and lesson.strip() for lesson in doc.get("lessons", []))
+            ]
         if "source_memory_ids" not in sql and "ORDER BY c.created_at DESC" in sql:
             docs.sort(key=lambda doc: doc.get("created_at", ""), reverse=True)
         elif "ORDER BY c.version DESC" in sql:
@@ -191,7 +196,7 @@ def _fact(fid: str, content: str, **extra: Any) -> dict[str, Any]:
     }
 
 
-def test_extract_memories_happy_path_writes_fact_and_episodic() -> None:
+def test_extract_memories_happy_path_writes_fact_only() -> None:
     store = FakeStore()
     turns_store = FakeStore([_turn("I prefer dark mode and learned CI needs retries.")])
     llm = FakeLLMService(
@@ -207,17 +212,7 @@ def test_extract_memories_happy_path_writes_fact_and_episodic() -> None:
                         "tags": ["ui"],
                     }
                 ],
-                "episodic": [
-                    {
-                        "scope_type": "project",
-                        "scope_value": "CI",
-                        "situation": "CI tests flaked intermittently",
-                        "action_taken": "Added retries",
-                        "outcome": "Tests stabilized",
-                        "lesson": "Use retries for flaky CI tests.",
-                        "confidence": 0.8,
-                    }
-                ],
+                "episodic": [],
             }
         ]
     )
@@ -225,17 +220,12 @@ def test_extract_memories_happy_path_writes_fact_and_episodic() -> None:
     result = _pipeline(store, llm, turns_store=turns_store).extract_memories("u1", "t1")
 
     assert result["fact_count"] == 1
-    assert result["episodic_count"] == 1
+    assert result["episodic_count"] == 0
     assert result["updated_count"] == 0
-    assert [doc["type"] for doc in store.upserts] == ["fact", "episodic"]
+    assert [doc["type"] for doc in store.upserts] == ["fact"]
     assert set(store.upserts[0]["tags"]) == {"sys:fact", "sys:auto-extracted", "topic:ui"}
     assert llm.chat_calls
-    assert llm.embed_calls == [
-        [
-            "The user prefers dark mode.",
-            "CI tests flaked intermittently → Added retries → Tests stabilized",
-        ]
-    ]
+    assert llm.embed_calls == [["The user prefers dark mode."]]
 
 
 def test_extract_memories_creates_new_fact_without_superseding() -> None:
@@ -277,7 +267,7 @@ def test_synthesize_procedural_produces_procedural_memory() -> None:
                 "role": "system",
                 "type": "episodic",
                 "content": "Past project",
-                "metadata": {"lesson": "Keep examples small."},
+                "lessons": ["Keep examples small."],
                 "salience": 0.8,
                 "created_at": "2025-01-02T00:00:00+00:00",
             },

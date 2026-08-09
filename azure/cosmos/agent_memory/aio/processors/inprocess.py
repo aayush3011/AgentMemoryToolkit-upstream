@@ -94,6 +94,15 @@ class AsyncInProcessProcessor:
         extracted = await self._pipeline.extract_memories(user_id, thread_id, recent_k=recent_k)
         return {k: v for k, v in extracted.items() if isinstance(v, int)} if isinstance(extracted, dict) else {}
 
+    async def process_extract_episodes(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> dict[str, int]:
+        extracted = await self._pipeline.extract_episodes(user_id, thread_id)
+        return {k: v for k, v in extracted.items() if isinstance(v, int)} if isinstance(extracted, dict) else {}
+
     async def process_thread_summary(
         self,
         *,

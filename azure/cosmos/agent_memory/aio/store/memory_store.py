@@ -197,10 +197,12 @@ class AsyncMemoryStore:
             if memory_type == "fact":
                 meta.setdefault("category", "unclassified:manual")
             elif memory_type == "episodic":
-                meta.setdefault("lesson", content)
-                meta.setdefault("scope_type", "manual")
-                meta.setdefault("scope_value", "manual")
-                meta.setdefault("outcome_valence", "neutral")
+                kwargs.setdefault("title", meta.get("title") or content[:80] or "Manual episode")
+                kwargs.setdefault("participants", [])
+                kwargs.setdefault("events", [])
+                kwargs.setdefault("outcome", None)
+                kwargs.setdefault("lessons", [content] if content else [])
+                kwargs.setdefault("source_turn_ids", [])
             elif memory_type == "procedural":
                 kwargs.setdefault("source_fact_ids", ["manual"])
             kwargs["metadata"] = meta
@@ -801,6 +803,62 @@ class AsyncMemoryStore:
             items = [i for i in items if i.get("metadata", {}).get("category") == category]
         return items
 
+    async def get_episodes(
+        self,
+        user_id: str,
+        thread_id: Optional[str] = None,
+        recent_k: Optional[int] = None,
+        *,
+        include_superseded: bool = False,
+        created_after: Optional[str | datetime] = None,
+        created_before: Optional[str | datetime] = None,
+        started_at: Optional[str | datetime] = None,
+        ended_at: Optional[str | datetime] = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve active episodic memories for a user, newest first."""
+        if not user_id:
+            raise ValidationError("user_id is required for get_episodes")
+
+        qb = _QueryBuilder()
+        qb.add_filter("c.user_id", "@user_id", user_id)
+        qb.add_filter("c.thread_id", "@thread_id", thread_id)
+        qb.add_filter("c.type", "@type", "episodic")
+        qb.add_time_range(
+            "c.created_at",
+            after=_coerce_datetime_iso(created_after),
+            before=_coerce_datetime_iso(created_before),
+            after_param="@created_after",
+            before_param="@created_before",
+        )
+        qb.add_time_range(
+            "c.started_at",
+            after=_coerce_datetime_iso(started_at),
+            after_param="@started_at",
+        )
+        qb.add_time_range(
+            "c.ended_at",
+            before=_coerce_datetime_iso(ended_at),
+            before_param="@ended_at",
+        )
+        if not include_superseded:
+            qb.add_is_null_or_undefined("c.superseded_by")
+
+        parameters = qb.get_parameters()
+        if recent_k is not None:
+            parameters.append({"name": "@recent_k", "value": recent_k})
+            sql = f"SELECT TOP @recent_k * FROM c{qb.build_where()} ORDER BY c.created_at DESC"
+        else:
+            sql = f"SELECT * FROM c{qb.build_where()} ORDER BY c.created_at DESC"
+
+        partition_key, _ = query_scope(user_id, thread_id)
+        logger.debug("AsyncMemoryStore.get_episodes query: %s", sql)
+        return await self.query(
+            sql,
+            parameters,
+            container_key=ContainerKey.MEMORIES,
+            partition_key=partition_key,
+        )
+
     async def search(
         self,
         search_terms: Optional[str] = None,
@@ -1041,15 +1099,61 @@ class AsyncMemoryStore:
         top_k: int = 5,
         min_salience: Optional[float] = None,
         include_superseded: bool = False,
+        thread_id: Optional[str] = None,
+        created_after: Optional[str | datetime] = None,
+        created_before: Optional[str | datetime] = None,
+        started_at: Optional[str | datetime] = None,
+        ended_at: Optional[str | datetime] = None,
     ) -> list[dict[str, Any]]:
-        """Semantic search across episodic memories for a user."""
-        return await self.search(
-            search_terms=search_terms,
-            user_id=user_id,
-            memory_types=["episodic"],
-            top_k=top_k,
-            min_salience=min_salience,
+        """Vector + full-text search over episodic ``content`` for a user."""
+        if not user_id:
+            raise ValidationError("user_id is required for search_episodic")
+        terms = require_search_terms(search_terms)
+        top = top_literal(top_k, name="top_k")
+        query_vector = await self._embed(terms)
+        keywords = extract_keywords(terms)
+
+        qb = _QueryBuilder()
+        qb.add_filter("c.user_id", "@user_id", user_id)
+        qb.add_filter("c.thread_id", "@thread_id", thread_id)
+        qb.add_filter("c.type", "@type", "episodic")
+        qb.add_time_range(
+            "c.created_at",
+            after=_coerce_datetime_iso(created_after),
+            before=_coerce_datetime_iso(created_before),
+            after_param="@created_after",
+            before_param="@created_before",
+        )
+        qb.add_time_range(
+            "c.started_at",
+            after=_coerce_datetime_iso(started_at),
+            after_param="@started_at",
+        )
+        qb.add_time_range(
+            "c.ended_at",
+            before=_coerce_datetime_iso(ended_at),
+            before_param="@ended_at",
+        )
+        add_salience_filter(qb, min_salience)
+
+        sql = build_search_sql(
+            qb=qb,
+            top=top,
+            keyword_count=len(keywords),
             include_superseded=include_superseded,
+        )
+        parameters = qb.get_parameters()
+        parameters.append({"name": "@embedding", "value": query_vector})
+        for i, kw in enumerate(keywords):
+            parameters.append({"name": f"@kw{i}", "value": kw})
+
+        partition_key, _ = query_scope(user_id, thread_id)
+        logger.debug("AsyncMemoryStore.search_episodic query: %s", sql)
+        return await self.query(
+            sql,
+            parameters,
+            container_key=ContainerKey.MEMORIES,
+            partition_key=partition_key,
         )
 
     async def build_episodic_context(self, user_id: str, query: str, top_k: int = 3) -> str:

@@ -17,6 +17,33 @@ logger = get_logger(__name__)
 
 DEFAULT_FACT_EXTRACTION_EVERY_N = 1
 DEFAULT_THREAD_SUMMARY_EVERY_N = 10
+# Episodic memory is boundary-based, not turn-cadence: the turn stream is
+# segmented into coherent experiences and each *closed* segment becomes one
+# immutable episode. EPISODE_EVAL_EVERY_N is the cheap boundary-evaluation
+# cadence (how often we CHECK for a boundary), NOT how often we create an
+# episode. 0 disables episodic memory entirely. When enabled, boundaries are
+# detected automatically from an idle time-gap, a topic-drift shift, or a
+# max-size safety cap - the caller never has to signal "session end". Default 4
+# checks the open segment every 4 turns: responsive enough to close a boundary
+# promptly while keeping the per-check overhead (a turn query + drift embeddings)
+# low. Set to 0 to disable episodic memory.
+DEFAULT_EPISODE_EVAL_EVERY_N = 4
+# A gap larger than this many seconds between two consecutive turns closes the
+# open episode (natural session / idle boundary).
+DEFAULT_EPISODE_IDLE_GAP_SECONDS = 1800
+# Cosine distance from the open segment's centroid past which a new turn counts
+# as a topic/goal shift and closes the prior episode. Requires embeddings.
+# Default 0 (OFF): episodes are segmented purely by the idle time-gap and the
+# max-size cap, so a dated multi-session conversation yields one episode per
+# session. Set to a positive value (e.g. 0.35) to additionally split a long
+# single-session run into per-topic episodes; this is heuristic and adds one
+# embedding pass over the open segment per boundary evaluation.
+DEFAULT_EPISODE_TOPIC_DRIFT = 0.0
+# Hard cap on an open segment: force a boundary so neither an episode nor its
+# extraction prompt grows unbounded during a long single-topic session.
+DEFAULT_EPISODE_MAX_TURNS = 40
+# Minimum turns before a drift signal may close an episode / minimum episode size.
+DEFAULT_EPISODE_MIN_TURNS = 2
 DEFAULT_USER_SUMMARY_EVERY_N = 20
 # Dedup runs on its own cadence - every Nth extract (NOT every Nth turn),
 # because dedup is O(N²) over all active facts and dominates per-push cost
@@ -106,6 +133,26 @@ def _parse_bool(name: str, default: bool) -> bool:
     return default
 
 
+def _parse_threshold_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        parsed = float(raw)
+    except (ValueError, TypeError):
+        logger.warning("Invalid value for %s=%r, using default %s", name, raw, default)
+        return default
+    if parsed < 0:
+        logger.warning(
+            "Negative value for %s=%r is not allowed; using default %s (set to 0 to disable)",
+            name,
+            raw,
+            default,
+        )
+        return default
+    return parsed
+
+
 def default_ttl_for(memory_type: str) -> Optional[int]:
     """Return the per-type default TTL, or None for 'use container default'.
 
@@ -125,6 +172,32 @@ def get_fact_extraction_every_n() -> int:
 
 def get_thread_summary_every_n() -> int:
     return _parse_threshold("THREAD_SUMMARY_EVERY_N", DEFAULT_THREAD_SUMMARY_EVERY_N)
+
+
+def get_episode_eval_every_n() -> int:
+    """Boundary-evaluation cadence in turns. 0 disables episodic memory entirely.
+
+    This is how often we cheaply CHECK the open segment for a boundary, not how
+    often an episode is created; an episode is created only when a boundary is
+    actually detected (idle gap, topic drift, or max-size cap).
+    """
+    return _parse_threshold("EPISODE_EVAL_EVERY_N", DEFAULT_EPISODE_EVAL_EVERY_N)
+
+
+def get_episode_idle_gap_seconds() -> int:
+    return _parse_threshold("EPISODE_IDLE_GAP_SECONDS", DEFAULT_EPISODE_IDLE_GAP_SECONDS)
+
+
+def get_episode_topic_drift() -> float:
+    return _parse_threshold_float("EPISODE_TOPIC_DRIFT", DEFAULT_EPISODE_TOPIC_DRIFT)
+
+
+def get_episode_max_turns() -> int:
+    return _parse_threshold("EPISODE_MAX_TURNS", DEFAULT_EPISODE_MAX_TURNS)
+
+
+def get_episode_min_turns() -> int:
+    return _parse_threshold("EPISODE_MIN_TURNS", DEFAULT_EPISODE_MIN_TURNS)
 
 
 def get_user_summary_every_n() -> int:
@@ -237,6 +310,11 @@ def get_processor_owner() -> Optional[str]:
 __all__ = [
     "DEFAULT_FACT_EXTRACTION_EVERY_N",
     "DEFAULT_THREAD_SUMMARY_EVERY_N",
+    "DEFAULT_EPISODE_EVAL_EVERY_N",
+    "DEFAULT_EPISODE_IDLE_GAP_SECONDS",
+    "DEFAULT_EPISODE_TOPIC_DRIFT",
+    "DEFAULT_EPISODE_MAX_TURNS",
+    "DEFAULT_EPISODE_MIN_TURNS",
     "DEFAULT_USER_SUMMARY_EVERY_N",
     "DEFAULT_DEDUP_EVERY_N",
     "DEFAULT_DEDUP_POOL_SIZE",
@@ -249,6 +327,11 @@ __all__ = [
     "default_ttl_for",
     "get_fact_extraction_every_n",
     "get_thread_summary_every_n",
+    "get_episode_eval_every_n",
+    "get_episode_idle_gap_seconds",
+    "get_episode_topic_drift",
+    "get_episode_max_turns",
+    "get_episode_min_turns",
     "get_user_summary_every_n",
     "get_dedup_every_n",
     "get_dedup_pool_size",

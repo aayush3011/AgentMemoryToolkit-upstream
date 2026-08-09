@@ -93,15 +93,7 @@ def test_extract_defaults_confidence_to_half_when_missing():
     pipeline, upserted = _make_pipeline(
         {
             "facts": [{"text": "User likes coffee", "action": "ADD"}],
-            "episodic": [
-                {
-                    "scope_type": "project",
-                    "scope_value": "X rollout",
-                    "situation": "Trying X",
-                    "action_taken": "Did Y",
-                    "outcome": "Worked",
-                }
-            ],
+            "episodic": [],
         }
     )
 
@@ -109,27 +101,6 @@ def test_extract_defaults_confidence_to_half_when_missing():
 
     for doc in upserted:
         assert doc["confidence"] == 0.5, f"missing default for {doc['type']} {doc['id']}"
-
-
-def test_extract_episodic_carries_confidence():
-    pipeline, upserted = _make_pipeline(
-        {
-            "episodic": [
-                {
-                    "scope_type": "project",
-                    "scope_value": "CI revamp",
-                    "situation": "Setup CI",
-                    "action_taken": "Added Ruff",
-                    "outcome": "Faster lint",
-                    "confidence": 0.8,
-                    "salience": 0.7,
-                }
-            ]
-        }
-    )
-    pipeline.extract_memories("u1", "t1")
-    [ep] = [d for d in upserted if d["type"] == "episodic"]
-    assert ep["confidence"] == pytest.approx(0.8)
 
 
 class TestMarkSupersededDoesNotMutate:
@@ -260,16 +231,11 @@ class TestGenerateUserSummaryThreadIdsObservabilityOnly:
 
 
 # ---------------------------------------------------------------------------
-# Scoped episodic memories (scope_type / scope_value)
+# Legacy episodic fields in extract_memories.prompty responses
 # ---------------------------------------------------------------------------
 
 
-def test_extract_scoped_intent_without_outcome_stores_correctly(caplog):
-    """An episodic with only scope fields (no situation/action/outcome) is kept.
-
-    The doc must use the deterministic fallback content string, expose the
-    scope fields at the top level, and not emit a "dropping malformed" warning.
-    """
+def test_extract_memories_ignores_legacy_episodic_payloads(caplog):
     pipeline, upserted = _make_pipeline(
         {
             "episodic": [
@@ -284,183 +250,11 @@ def test_extract_scoped_intent_without_outcome_stores_correctly(caplog):
     )
 
     with caplog.at_level("WARNING", logger="azure.cosmos.agent_memory.pipeline"):
-        pipeline.extract_memories("u1", "t1")
+        result = pipeline.extract_memories("u1", "t1")
 
-    eps = [d for d in upserted if d["type"] == "episodic"]
-    assert len(eps) == 1
-    ep = eps[0]
-    assert ep["scope_type"] == "trip"
-    assert ep["scope_value"] == "Paris"
-    assert ep["metadata"]["scope_type"] == "trip"
-    assert ep["metadata"]["scope_value"] == "Paris"
-    assert ep["metadata"]["situation"] is None
-    assert ep["metadata"]["action_taken"] is None
-    assert ep["metadata"]["outcome"] is None
-    assert ep["content"] == "For the user's Paris trip, intent recorded."
-    assert ep["confidence"] == pytest.approx(0.95)
+    assert result["episodic_count"] == 0
+    assert not any(d["type"] == "episodic" for d in upserted)
     assert not any("dropping malformed episodic" in rec.getMessage() for rec in caplog.records)
-
-
-def test_extract_past_event_episodic_uses_arrow_form_and_keeps_scope():
-    pipeline, upserted = _make_pipeline(
-        {
-            "episodic": [
-                {
-                    "scope_type": "project",
-                    "scope_value": "Acme revamp",
-                    "situation": "Migrated DB",
-                    "action_taken": "Ran the script",
-                    "outcome": "All rows migrated",
-                    "outcome_valence": "positive",
-                    "reasoning": "Schema was simple",
-                    "lesson": "Test on staging first",
-                    "domain": "engineering",
-                    "confidence": 0.88,
-                    "salience": 0.6,
-                    "tags": ["db"],
-                }
-            ]
-        }
-    )
-
-    pipeline.extract_memories("u1", "t1")
-
-    [ep] = [d for d in upserted if d["type"] == "episodic"]
-    assert ep["content"] == "Migrated DB → Ran the script → All rows migrated"
-    assert ep["scope_type"] == "project"
-    assert ep["scope_value"] == "Acme revamp"
-    md = ep["metadata"]
-    assert md["situation"] == "Migrated DB"
-    assert md["action_taken"] == "Ran the script"
-    assert md["outcome"] == "All rows migrated"
-    assert md["outcome_valence"] == "positive"
-    assert md["reasoning"] == "Schema was simple"
-    assert md["lesson"] == "Test on staging first"
-    assert md["domain"] == "engineering"
-    assert "topic:db" in ep["tags"]
-
-
-def test_extract_episodic_falls_back_to_arrow_form_when_summary_field_present():
-    """The schema dropped ``summary``; pipeline now always uses arrow form.
-
-    Even if a non-strict LLM smuggles a ``summary`` field through, the
-    pipeline ignores it and builds content from
-    ``situation → action_taken → outcome``.
-    """
-    pipeline, upserted = _make_pipeline(
-        {
-            "episodic": [
-                {
-                    "scope_type": "trip",
-                    "scope_value": "Paris",
-                    "summary": "User wants luxury hotels for the Paris trip.",
-                    "situation": "Planning Paris trip",
-                    "action_taken": "Said luxury",
-                    "outcome": "Pending",
-                }
-            ]
-        }
-    )
-
-    pipeline.extract_memories("u1", "t1")
-
-    [ep] = [d for d in upserted if d["type"] == "episodic"]
-    assert ep["content"] == "Planning Paris trip → Said luxury → Pending"
-
-
-def test_extract_drops_episodic_missing_scope_type(caplog):
-    pipeline, upserted = _make_pipeline(
-        {
-            "episodic": [
-                {
-                    "scope_value": "Paris",
-                    "situation": "Planning",
-                    "action_taken": "Booked",
-                    "outcome": "Confirmed",
-                }
-            ]
-        }
-    )
-
-    with caplog.at_level("WARNING", logger="azure.cosmos.agent_memory.pipeline"):
-        pipeline.extract_memories("u1", "t1")
-
-    assert not any(d["type"] == "episodic" for d in upserted)
-    assert any("dropping malformed episodic" in rec.getMessage() for rec in caplog.records)
-
-
-def test_extract_drops_episodic_missing_scope_value(caplog):
-    pipeline, upserted = _make_pipeline(
-        {
-            "episodic": [
-                {
-                    "scope_type": "trip",
-                    "situation": "Planning",
-                    "action_taken": "Booked",
-                    "outcome": "Confirmed",
-                }
-            ]
-        }
-    )
-
-    with caplog.at_level("WARNING", logger="azure.cosmos.agent_memory.pipeline"):
-        pipeline.extract_memories("u1", "t1")
-
-    assert not any(d["type"] == "episodic" for d in upserted)
-    assert any("dropping malformed episodic" in rec.getMessage() for rec in caplog.records)
-
-
-@pytest.mark.parametrize(
-    "scope_type,scope_value",
-    [
-        ("", "Paris"),
-        ("   ", "Paris"),
-        ("trip", ""),
-        ("trip", "   "),
-        (None, "Paris"),
-        ("trip", None),
-        (123, "Paris"),
-    ],
-)
-def test_extract_drops_episodic_with_blank_or_invalid_scope(scope_type, scope_value, caplog):
-    pipeline, upserted = _make_pipeline(
-        {
-            "episodic": [
-                {
-                    "scope_type": scope_type,
-                    "scope_value": scope_value,
-                    "confidence": 0.9,
-                }
-            ]
-        }
-    )
-
-    with caplog.at_level("WARNING", logger="azure.cosmos.agent_memory.pipeline"):
-        pipeline.extract_memories("u1", "t1")
-
-    assert not any(d["type"] == "episodic" for d in upserted)
-    assert any("dropping malformed episodic" in rec.getMessage() for rec in caplog.records)
-
-
-def test_extract_strips_whitespace_from_scope_fields():
-    pipeline, upserted = _make_pipeline(
-        {
-            "episodic": [
-                {
-                    "scope_type": "  trip  ",
-                    "scope_value": "  Paris  ",
-                    "confidence": 0.9,
-                }
-            ]
-        }
-    )
-
-    pipeline.extract_memories("u1", "t1")
-
-    [ep] = [d for d in upserted if d["type"] == "episodic"]
-    assert ep["scope_type"] == "trip"
-    assert ep["scope_value"] == "Paris"
-    assert ep["content"] == "For the user's Paris trip, intent recorded."
 
 
 def test_extract_compound_statement_yields_facts_across_categories():

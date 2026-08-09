@@ -12,6 +12,7 @@ from unittest.mock import MagicMock, patch
 
 from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
+from azure.cosmos.agent_memory.auto_trigger import maybe_trigger_steps
 from azure.cosmos.agent_memory.cosmos_memory_client import CosmosMemoryClient
 from azure.cosmos.agent_memory.processors import DurableFunctionProcessor, InProcessProcessor
 
@@ -65,6 +66,7 @@ def _connected(processor=None) -> CosmosMemoryClient:
 def test_push_to_cosmos_fires_inprocess_trigger_per_turn(monkeypatch):
     monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
     monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
+    monkeypatch.setenv("EPISODE_EVAL_EVERY_N", "0")
 
     client = _connected(processor=InProcessProcessor(pipeline=MagicMock()))
     counter_container = MagicMock()
@@ -88,6 +90,7 @@ def test_push_to_cosmos_fires_inprocess_trigger_per_turn(monkeypatch):
 
 def test_push_to_cosmos_durable_does_not_fire_trigger(monkeypatch):
     monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
+    monkeypatch.setenv("EPISODE_EVAL_EVERY_N", "0")
     client = _connected(processor=DurableFunctionProcessor())
     client._counter_container_client = MagicMock()
 
@@ -104,6 +107,7 @@ def test_push_to_cosmos_durable_does_not_fire_trigger(monkeypatch):
 def test_push_to_cosmos_skips_trigger_when_thresholds_zero(monkeypatch):
     monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "0")
     monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
+    monkeypatch.setenv("EPISODE_EVAL_EVERY_N", "0")
     monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
 
     client = _connected(processor=InProcessProcessor(pipeline=MagicMock()))
@@ -122,6 +126,7 @@ def test_push_to_cosmos_skips_trigger_when_thresholds_zero(monkeypatch):
 def test_push_to_cosmos_swallows_trigger_failures(monkeypatch):
     """Auto-trigger errors must never propagate from push_to_cosmos."""
     monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
+    monkeypatch.setenv("EPISODE_EVAL_EVERY_N", "0")
 
     pipeline = MagicMock()
     pipeline.generate_thread_summary.side_effect = RuntimeError("boom")
@@ -138,6 +143,7 @@ def test_push_to_cosmos_swallows_trigger_failures(monkeypatch):
 
 def test_push_to_cosmos_skips_when_counter_container_unavailable(monkeypatch):
     monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
+    monkeypatch.setenv("EPISODE_EVAL_EVERY_N", "0")
 
     client = _connected(processor=InProcessProcessor(pipeline=MagicMock()))
     # Counter container handle stays None; lazy getter would normally try to
@@ -162,10 +168,75 @@ def test_push_to_cosmos_skips_when_counter_container_unavailable(monkeypatch):
 
 
 class TestPerStepAutoTrigger:
+    def test_episode_zero_does_not_fire(self):
+        processor = InProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_episodes = MagicMock()
+        counter_container = _FakeCounterContainer()
+
+        maybe_trigger_steps(
+            processor,
+            counter_container,
+            {("u1", "t1"): 1},
+            thresholds={
+                "FACT_EXTRACTION_EVERY_N": 0,
+                "THREAD_SUMMARY_EVERY_N": 0,
+                "EPISODE_EVAL_EVERY_N": 0,
+                "USER_SUMMARY_EVERY_N": 0,
+                "MEMORY_PROCESSOR_OWNER": "inprocess",
+            },
+        )
+
+        processor.process_extract_episodes.assert_not_called()
+        assert counter_container.store == {}
+
+    def test_episode_fires_when_threshold_crossed(self):
+        processor = InProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_episodes = MagicMock(return_value={})
+        counter_container = _FakeCounterContainer()
+        thresholds = {
+            "FACT_EXTRACTION_EVERY_N": 0,
+            "THREAD_SUMMARY_EVERY_N": 0,
+            "EPISODE_EVAL_EVERY_N": 3,
+            "USER_SUMMARY_EVERY_N": 0,
+            "MEMORY_PROCESSOR_OWNER": "inprocess",
+        }
+
+        maybe_trigger_steps(processor, counter_container, {("u1", "t1"): 2}, thresholds=thresholds)
+        processor.process_extract_episodes.assert_not_called()
+
+        maybe_trigger_steps(processor, counter_container, {("u1", "t1"): 1}, thresholds=thresholds)
+
+        processor.process_extract_episodes.assert_called_once_with(user_id="u1", thread_id="t1")
+
+    def test_episode_failure_is_caught_and_other_steps_continue(self):
+        processor = InProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_episodes = MagicMock(side_effect=RuntimeError("episode boom"))
+        processor.process_thread_summary = MagicMock(return_value={})
+        counter_container = _FakeCounterContainer()
+
+        with patch("azure.cosmos.agent_memory._counters.stamp_failure_sync") as stamp:
+            maybe_trigger_steps(
+                processor,
+                counter_container,
+                {("u1", "t1"): 1},
+                thresholds={
+                    "FACT_EXTRACTION_EVERY_N": 0,
+                    "THREAD_SUMMARY_EVERY_N": 1,
+                    "EPISODE_EVAL_EVERY_N": 1,
+                    "USER_SUMMARY_EVERY_N": 0,
+                    "MEMORY_PROCESSOR_OWNER": "inprocess",
+                },
+            )
+
+        processor.process_extract_episodes.assert_called_once_with(user_id="u1", thread_id="t1")
+        processor.process_thread_summary.assert_called_once_with(user_id="u1", thread_id="t1")
+        stamp.assert_called_once()
+
     def test_extract_fires_independently_of_summary(self, monkeypatch):
         """N_facts=1 alone fires extract; summary/user-summary stay quiet."""
         monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
         monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "10")
+        monkeypatch.setenv("EPISODE_EVAL_EVERY_N", "0")
         monkeypatch.setenv("USER_SUMMARY_EVERY_N", "20")
 
         processor = InProcessProcessor(pipeline=MagicMock())
@@ -193,6 +264,7 @@ class TestPerStepAutoTrigger:
         NO recent_k and tracks NO success-gated watermark."""
         monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
         monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
+        monkeypatch.setenv("EPISODE_EVAL_EVERY_N", "0")
         monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
 
         processor = InProcessProcessor(pipeline=MagicMock())
@@ -216,6 +288,7 @@ class TestPerStepAutoTrigger:
         the pipeline, so this outer path only sees unexpected total failures."""
         monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
         monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
+        monkeypatch.setenv("EPISODE_EVAL_EVERY_N", "0")
         monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
 
         processor = InProcessProcessor(pipeline=MagicMock())
@@ -242,6 +315,7 @@ class TestPerStepAutoTrigger:
         """N_summary=10 boundary fires summary; N_facts=0 prevents extract."""
         monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "0")
         monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "10")
+        monkeypatch.setenv("EPISODE_EVAL_EVERY_N", "0")
         monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
 
         processor = InProcessProcessor(pipeline=MagicMock())
@@ -265,6 +339,7 @@ class TestPerStepAutoTrigger:
         """The user-scoped counter is incremented separately from the thread counter."""
         monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "0")
         monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
+        monkeypatch.setenv("EPISODE_EVAL_EVERY_N", "0")
         monkeypatch.setenv("USER_SUMMARY_EVERY_N", "2")
 
         processor = InProcessProcessor(pipeline=MagicMock())
@@ -295,6 +370,7 @@ class TestPerStepAutoTrigger:
 class TestProcessorOwner:
     def test_durable_owner_suppresses_sdk_trigger(self, monkeypatch):
         monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
+        monkeypatch.setenv("EPISODE_EVAL_EVERY_N", "0")
         monkeypatch.setenv("MEMORY_PROCESSOR_OWNER", "durable")
 
         processor = InProcessProcessor(pipeline=MagicMock())
@@ -316,6 +392,7 @@ class TestProcessorOwner:
     def test_inprocess_owner_allows_sdk_trigger(self, monkeypatch):
         monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
         monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
+        monkeypatch.setenv("EPISODE_EVAL_EVERY_N", "0")
         monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
         monkeypatch.setenv("MEMORY_PROCESSOR_OWNER", "inprocess")
 

@@ -110,10 +110,13 @@ def _fact_doc(
 def _episodic_doc(
     doc_id: str,
     *,
-    lesson: str,
+    lesson: str | None = None,
+    lessons: list[str] | None = None,
     salience: float = 0.7,
     created_at: str = "2025-01-02T00:00:00+00:00",
 ) -> dict:
+    if lessons is None:
+        lessons = [lesson] if lesson else []
     return {
         "id": doc_id,
         "user_id": "u1",
@@ -121,7 +124,7 @@ def _episodic_doc(
         "role": "system",
         "type": "episodic",
         "content": f"Episode {doc_id}",
-        "metadata": {"lesson": lesson},
+        "lessons": lessons,
         "salience": salience,
         "created_at": created_at,
     }
@@ -213,7 +216,7 @@ def _make_client(*, processor=None) -> CosmosMemoryClient:
     return client
 
 
-def test_extract_memories_without_procedural_bucket_returns_new_count_shape():
+def test_extract_memories_returns_count_shape_and_ignores_legacy_episodic_payload():
     pipeline, _, upserted = _make_extract_pipeline(
         {
             "facts": [
@@ -241,7 +244,7 @@ def test_extract_memories_without_procedural_bucket_returns_new_count_shape():
     legacy_proc_key = "_".join(("procedural", "count"))
 
     assert result["fact_count"] == 1
-    assert result["episodic_count"] == 1
+    assert result["episodic_count"] == 0
     assert legacy_fact_count_key not in result
     assert legacy_proc_key not in result
     assert all(doc["type"] != "procedural" for doc in upserted)
@@ -303,6 +306,38 @@ def test_synthesize_procedural_first_synthesis_from_empty_prior():
     assert doc["supersedes_ids"] == []
     assert upserted == [doc]
     container.replace_item.assert_not_called()
+
+
+def test_synthesize_procedural_flattens_multiple_lessons_per_episode():
+    fact_docs = [
+        _fact_doc("f1", "Always use bullet points.", category="preference", salience=0.95),
+    ]
+    episodic_docs = [
+        _episodic_doc(
+            "e1",
+            lessons=[
+                "When the user asks for brevity, keep the answer terse.",
+                "Confirm cancellations explicitly before acting.",
+            ],
+            salience=0.8,
+        ),
+        _episodic_doc("e2", lessons=[], salience=0.2),
+    ]
+    pipeline, _, _ = _make_synthesis_pipeline(
+        fact_docs=fact_docs,
+        episodic_docs=episodic_docs,
+        llm_output="Be concise and confirm before acting.",
+    )
+
+    result = pipeline.synthesize_procedural("u1", force=False)
+
+    assert result["status"] == "synthesized"
+    doc = result["procedural"]
+    assert set(doc["source_episodic_ids"]) == {"e1"}
+
+    rendered = pipeline._run_prompty.call_args.kwargs["inputs"]["episodic_lessons"]
+    assert "When the user asks for brevity, keep the answer terse." in rendered
+    assert "Confirm cancellations explicitly before acting." in rendered
 
 
 def test_synthesize_procedural_only_touches_memories_container():

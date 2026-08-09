@@ -107,7 +107,7 @@ def em_Extract(payload: dict) -> dict:
     recent_k = payload.get("recent_k")
     if recent_k is None:
         recent_k = config.get_max_batch_size()
-    extracted = get_pipeline().extract_memories_dry(
+    extracted = get_pipeline().extract_memories_durable(
         user_id=user_id,
         thread_id=thread_id,
         recent_k=recent_k,

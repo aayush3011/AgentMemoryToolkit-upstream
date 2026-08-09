@@ -376,22 +376,22 @@ class TestExtractMemoriesOrchestrator:
 class TestExtractMemoryActivities:
     def test_em_extract_uses_payload_recent_k(self):
         pipeline = MagicMock()
-        pipeline.extract_memories_dry.return_value = {"facts": [], "episodic": [], "updates": []}
+        pipeline.extract_memories_durable.return_value = {"facts": [], "episodic": [], "updates": []}
 
         with patch.object(em_mod, "get_pipeline", return_value=pipeline):
             result = em_mod.em_Extract({"user_id": "u1", "thread_id": "t1", "recent_k": 3})
 
-        pipeline.extract_memories_dry.assert_called_once_with(user_id="u1", thread_id="t1", recent_k=3)
+        pipeline.extract_memories_durable.assert_called_once_with(user_id="u1", thread_id="t1", recent_k=3)
         assert result == {"facts": [], "episodic": [], "updates": []}
 
     def test_em_extract_falls_back_to_max_batch_size_when_recent_k_absent(self):
         pipeline = MagicMock()
-        pipeline.extract_memories_dry.return_value = {"facts": [], "episodic": [], "updates": []}
+        pipeline.extract_memories_durable.return_value = {"facts": [], "episodic": [], "updates": []}
 
         with patch.object(em_mod, "get_pipeline", return_value=pipeline):
             em_mod.em_Extract({"user_id": "u1", "thread_id": "t1"})
 
-        pipeline.extract_memories_dry.assert_called_once_with(user_id="u1", thread_id="t1", recent_k=20)
+        pipeline.extract_memories_durable.assert_called_once_with(user_id="u1", thread_id="t1", recent_k=20)
 
     def test_em_dedup_delegates_to_pipeline_and_returns_deduped_dict(self):
         extracted = {"facts": [{"id": "f1"}], "episodic": [], "updates": []}

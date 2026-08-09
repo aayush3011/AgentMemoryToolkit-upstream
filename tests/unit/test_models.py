@@ -17,6 +17,8 @@ import pydantic
 import pytest
 
 from azure.cosmos.agent_memory.models import (
+    EpisodeEvent,
+    EpisodeOutcome,
     EpisodicRecord,
     FactRecord,
     MemoryRecord,
@@ -56,14 +58,24 @@ def _episodic_kwargs(**overrides: Any) -> dict[str, Any]:
     base = {
         "id": "ep_" + _HEX32,
         "user_id": "u1",
-        "content": "Trip planning worked.",
+        "content": "Paris trip planning worked because the team planned early.",
+        "title": "Paris trip planning",
+        "started_at": "2026-01-01T09:00:00+00:00",
+        "ended_at": "2026-01-02T10:00:00+00:00",
+        "participants": ["user", "agent"],
+        "events": [
+            {
+                "sequence": 1,
+                "description": "User asked for Paris trip planning help.",
+                "occurred_at": "2026-01-01T09:00:00+00:00",
+                "source_turn_ids": ["turn-1"],
+            },
+            EpisodeEvent(sequence=2, description="Agent recommended booking early.", source_turn_ids=["turn-2"]),
+        ],
+        "outcome": {"status": "successful", "description": "The trip plan was completed."},
+        "lessons": ["Plan early."],
+        "source_turn_ids": ["turn-1", "turn-2"],
         "content_hash": _HEX32,
-        "metadata": {
-            "lesson": "Plan early.",
-            "scope_type": "trip",
-            "scope_value": "Paris",
-            "outcome_valence": "positive",
-        },
         "prompt_id": "extract_memories.prompty",
     }
     base.update(overrides)
@@ -281,42 +293,40 @@ class TestEpisodicRecord:
     def test_minimal_valid(self):
         rec = EpisodicRecord(**_episodic_kwargs())
         assert rec.memory_type == "episodic"
-        assert rec.scope_type == "trip"
-        assert rec.scope_value == "Paris"
+        assert rec.title == "Paris trip planning"
+        assert rec.started_at == "2026-01-01T09:00:00+00:00"
+        assert rec.ended_at == "2026-01-02T10:00:00+00:00"
+        assert rec.participants == ["user", "agent"]
+        assert rec.events[0] == EpisodeEvent(
+            sequence=1,
+            description="User asked for Paris trip planning help.",
+            occurred_at="2026-01-01T09:00:00+00:00",
+            source_turn_ids=["turn-1"],
+        )
+        assert rec.events[1].description == "Agent recommended booking early."
+        assert rec.outcome == EpisodeOutcome(status="successful", description="The trip plan was completed.")
+        assert rec.lessons == ["Plan early."]
+        assert rec.source_turn_ids == ["turn-1", "turn-2"]
 
-    def test_requires_lesson_in_metadata(self):
-        meta = {"scope_type": "trip", "scope_value": "Paris", "outcome_valence": "positive"}
-        with pytest.raises(pydantic.ValidationError, match="lesson"):
-            EpisodicRecord(**_episodic_kwargs(metadata=meta))
+    def test_outcome_is_optional(self):
+        rec = EpisodicRecord(**_episodic_kwargs(outcome=None))
+        restored = MemoryRecordBase.from_doc(rec.to_doc())
+        assert rec.outcome is None
+        assert isinstance(restored, EpisodicRecord)
+        assert restored.outcome is None
 
-    def test_requires_scope_in_metadata(self):
-        meta = {"lesson": "x", "outcome_valence": "positive"}
-        with pytest.raises(pydantic.ValidationError, match="scope_type"):
-            EpisodicRecord(**_episodic_kwargs(metadata=meta))
+    def test_outcome_status_literal(self):
+        with pytest.raises(pydantic.ValidationError, match="outcome"):
+            EpisodicRecord(**_episodic_kwargs(outcome={"status": "bogus", "description": "Nope."}))
 
-    def test_outcome_valence_enum(self):
-        meta = {
-            "lesson": "x",
-            "scope_type": "t",
-            "scope_value": "v",
-            "outcome_valence": "bogus",
-        }
-        with pytest.raises(pydantic.ValidationError, match="outcome_valence"):
-            EpisodicRecord(**_episodic_kwargs(metadata=meta))
-
-    @pytest.mark.parametrize("valence", ["positive", "negative", "neutral", "mixed"])
-    def test_outcome_valence_accepts_all_schema_permitted_values(self, valence):
-        """Round-trip regression: every value the strict schema permits must
-        also be accepted by ``EpisodicRecord``. Previously ``"mixed"`` slipped
-        through schema validation but crashed the whole extract batch."""
-        meta = {
-            "lesson": "x",
-            "scope_type": "t",
-            "scope_value": "v",
-            "outcome_valence": valence,
-        }
-        rec = EpisodicRecord(**_episodic_kwargs(metadata=meta))
-        assert rec.metadata["outcome_valence"] == valence
+    def test_ended_at_must_not_be_before_started_at(self):
+        with pytest.raises(pydantic.ValidationError, match="ended_at must not be before started_at"):
+            EpisodicRecord(
+                **_episodic_kwargs(
+                    started_at="2026-01-02T10:00:00+00:00",
+                    ended_at="2026-01-01T09:00:00+00:00",
+                )
+            )
 
     def test_id_must_start_with_ep_prefix(self):
         with pytest.raises(pydantic.ValidationError, match="id must start with 'ep_'"):
@@ -556,10 +566,25 @@ class TestRoundTrip:
     def test_episodic_round_trip(self):
         original = EpisodicRecord(**_episodic_kwargs())
         doc = original.to_doc()
+        assert doc["events"][0] == {
+            "sequence": 1,
+            "description": "User asked for Paris trip planning help.",
+            "occurred_at": "2026-01-01T09:00:00+00:00",
+            "source_turn_ids": ["turn-1"],
+        }
+        assert doc["outcome"] == {"status": "successful", "description": "The trip plan was completed."}
         restored = MemoryRecordBase.from_doc(doc)
         assert isinstance(restored, EpisodicRecord)
-        assert restored.scope_type == "trip"
-        assert restored.scope_value == "Paris"
+        assert restored.title == original.title
+        assert restored.participants == ["user", "agent"]
+        assert restored.events[1] == EpisodeEvent(
+            sequence=2,
+            description="Agent recommended booking early.",
+            source_turn_ids=["turn-2"],
+        )
+        assert restored.outcome == EpisodeOutcome(status="successful", description="The trip plan was completed.")
+        assert restored.lessons == ["Plan early."]
+        assert restored.source_turn_ids == ["turn-1", "turn-2"]
 
     def test_from_doc_strips_cosmos_system_fields(self, sample_embedding):
         original = FactRecord(**_fact_kwargs(embedding=sample_embedding))

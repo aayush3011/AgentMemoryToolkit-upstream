@@ -16,6 +16,8 @@ from azure.cosmos.agent_memory.exceptions import ConfigurationError, ValidationE
 MEMORY_PROJECTION = (
     "c.id, c.user_id, c.thread_id, c.role, c.type, c.content, "
     "c.metadata, c.created_at, c.tags, c.salience, c.confidence, "
+    "c.title, c.started_at, c.ended_at, c.participants, c.events, "
+    "c.outcome, c.lessons, c.source_turn_ids, "
     "c.superseded_by, c.superseded_at, c.supersede_reason"
 )
 
@@ -84,10 +86,10 @@ def format_episodic_context(memories: Iterable[dict[str, Any]]) -> str:
         return ""
     lines = ["## Relevant Past Experiences"]
     for i, memory in enumerate(memories_list, 1):
-        metadata = memory.get("metadata") or {}
-        domain = metadata.get("domain", "general")
-        valence = metadata.get("outcome_valence", "neutral")
-        lines.append(f"{i}. [{domain}] {memory['content']} ({valence})")
+        title = memory.get("title") or "Episode"
+        outcome = memory.get("outcome") or {}
+        status = outcome.get("status", "unknown") if isinstance(outcome, dict) else "unknown"
+        lines.append(f"{i}. [{status}] {title}: {memory['content']}")
     return "\n".join(lines)
 
 

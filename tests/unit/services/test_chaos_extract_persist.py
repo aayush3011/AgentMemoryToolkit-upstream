@@ -178,7 +178,7 @@ def test_persist_retry_reuses_extract_output_without_second_llm_call() -> None:
         containers=_containers_for_store(store, turns_store=turns_store),
     )
 
-    extracted = service.extract_memories_dry("u1", "t1")
+    extracted = service.extract_memories_durable("u1", "t1")
     with pytest.raises(RuntimeError, match="transient"):
         service.persist_extracted_memories("u1", extracted)
     result = service.persist_extracted_memories("u1", extracted)
@@ -201,7 +201,7 @@ async def test_async_persist_retry_reuses_extract_output_without_second_llm_call
         containers=_async_containers_for_store(store, turns_store=turns_store),
     )
 
-    extracted = await service.extract_memories_dry("u1", "t1")
+    extracted = await service.extract_memories_durable("u1", "t1")
     with pytest.raises(RuntimeError, match="transient"):
         await service.persist_extracted_memories("u1", extracted)
     result = await service.persist_extracted_memories("u1", extracted)

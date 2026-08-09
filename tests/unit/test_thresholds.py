@@ -58,6 +58,7 @@ def test_enable_turn_embeddings_falsy_values(monkeypatch, raw) -> None:
     [
         ("FACT_EXTRACTION_EVERY_N", "get_fact_extraction_every_n", 1),
         ("THREAD_SUMMARY_EVERY_N", "get_thread_summary_every_n", 10),
+        ("EPISODE_EVAL_EVERY_N", "get_episode_eval_every_n", 4),
         ("USER_SUMMARY_EVERY_N", "get_user_summary_every_n", 20),
         ("DEDUP_EVERY_N", "get_dedup_every_n", 5),
         ("DEDUP_POOL_SIZE", "get_dedup_pool_size", 50),
@@ -80,6 +81,7 @@ def test_env_config_getters_defaults(
     [
         ("FACT_EXTRACTION_EVERY_N", "get_fact_extraction_every_n", "2", 2),
         ("THREAD_SUMMARY_EVERY_N", "get_thread_summary_every_n", "11", 11),
+        ("EPISODE_EVAL_EVERY_N", "get_episode_eval_every_n", "3", 3),
         ("USER_SUMMARY_EVERY_N", "get_user_summary_every_n", "21", 21),
         ("DEDUP_EVERY_N", "get_dedup_every_n", "3", 3),
         ("DEDUP_POOL_SIZE", "get_dedup_pool_size", "75", 75),
@@ -103,6 +105,7 @@ def test_env_config_getters_parse_env(
     [
         ("FACT_EXTRACTION_EVERY_N", "get_fact_extraction_every_n", 1),
         ("THREAD_SUMMARY_EVERY_N", "get_thread_summary_every_n", 10),
+        ("EPISODE_EVAL_EVERY_N", "get_episode_eval_every_n", 4),
         ("USER_SUMMARY_EVERY_N", "get_user_summary_every_n", 20),
         ("DEDUP_EVERY_N", "get_dedup_every_n", 5),
         ("DEDUP_POOL_SIZE", "get_dedup_pool_size", 50),
@@ -124,6 +127,7 @@ def test_int_getters_reject_negative(
     [
         ("FACT_EXTRACTION_EVERY_N", "get_fact_extraction_every_n", 1),
         ("THREAD_SUMMARY_EVERY_N", "get_thread_summary_every_n", 10),
+        ("EPISODE_EVAL_EVERY_N", "get_episode_eval_every_n", 4),
         ("USER_SUMMARY_EVERY_N", "get_user_summary_every_n", 20),
         ("DEDUP_EVERY_N", "get_dedup_every_n", 5),
         ("DEDUP_POOL_SIZE", "get_dedup_pool_size", 50),
