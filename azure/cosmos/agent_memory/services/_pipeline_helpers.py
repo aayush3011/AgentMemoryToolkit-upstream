@@ -117,6 +117,23 @@ def segment_time_bounds(items: list[dict[str, Any]]) -> tuple[Optional[str], Opt
     return parsed[0][1], parsed[-1][1]
 
 
+def created_at_sort_key(item: dict[str, Any]) -> tuple[int, float, str]:
+    """Total, chronological, stable sort key for a turn by ``created_at``.
+
+    Orders by PARSED instant (so mixed UTC offsets sort by true time, not lexical
+    string) and breaks ties on ``id`` so turns sharing one timestamp - common
+    when many turns carry the same session date - keep a deterministic order. A
+    stable order matters because the open segment's first/last turn ids seed the
+    ``segment_key`` that grounds the deterministic episode id: an unstable order
+    could shift that id between runs and admit a duplicate episode. Missing or
+    unparseable timestamps sort last, deterministically by id.
+    """
+    dt = parse_iso_datetime(item.get("created_at"))
+    if dt is None:
+        return (1, 0.0, str(item.get("id") or ""))
+    return (0, dt.timestamp(), str(item.get("id") or ""))
+
+
 def deterministic_episode_id(segment_key: str, index: int) -> str:
     """Identity from the STABLE segment key plus the episode's ordinal within the
     segment - never the LLM summary text - so re-running the same un-stamped
@@ -172,9 +189,21 @@ _NON_RETRYABLE_LLM_MARKERS = (
     "maximum context length",
 )
 
+# Programming errors, not provider failures: a bug in our own extraction/parse
+# code (e.g. calling ``.get`` on a non-dict, indexing past the end) raises one of
+# these. They are deterministic, so retrying re-fails identically and would wedge
+# the segment/batch forever - classify them non-retryable so the poison input is
+# quarantined and surfaced rather than deferred indefinitely. Note this is a
+# narrow allow-list of true code-bug types, NOT "any non-LLMError": genuine
+# transient provider failures (rate-limit / timeout / connection) are their own
+# SDK exception types and must stay retryable.
+_NON_RETRYABLE_EXC_TYPES = (AttributeError, KeyError, TypeError, IndexError, NameError)
+
 
 def is_retryable_llm_error(exc: BaseException) -> bool:
     """Classify an extraction LLM failure as retryable (transient) or not."""
+    if isinstance(exc, _NON_RETRYABLE_EXC_TYPES):
+        return False
     text = str(exc).lower()
     return not any(marker in text for marker in _NON_RETRYABLE_LLM_MARKERS)
 
@@ -568,9 +597,22 @@ def parse_llm_json(text: str | None) -> dict[str, Any]:
             ) from exc
         raise LLMError(f"LLM returned invalid JSON (preview={preview!r}): {exc}") from exc
     remainder = cleaned[end:]
+    if not isinstance(obj, dict):
+        # Type contract: this returns a JSON object. Some deployments emit a bare
+        # array or scalar root (e.g. ``[{...}]``); every caller then does
+        # ``parsed.get("facts"/"episodes")``, so returning a non-dict would
+        # surface downstream as an AttributeError that the extraction
+        # error-handlers misclassify as a transient (retryable) failure and defer
+        # forever. Raise a typed LLMError so a malformed root is handled like any
+        # other bad output instead of wedging the segment/batch.
+        preview = (text or "")[:200].replace("\n", " ")
+        raise LLMError(
+            f"LLM returned a non-object JSON root ({type(obj).__name__}); expected a JSON "
+            f"object such as {{'facts': [...]}}. preview={preview!r}"
+        )
     if not remainder.strip():
         # Fast path: exactly one JSON object, no trailing content (the vast
-        # majority of responses). Behaviour identical to before.
+        # majority of responses).
         return obj
 
     # Some models (notably under strict json_schema on certain deployments) emit
@@ -582,18 +624,6 @@ def parse_llm_json(text: str | None) -> dict[str, Any]:
     # them: list-valued keys (``facts``, ``events``, ...) are concatenated and any
     # other/scalar key keeps its first-seen value. Downstream exact-dup hashing
     # removes any repeats, so merging is always safe.
-    if not isinstance(obj, dict):
-        # Non-object JSON root with trailing data: cannot merge into a dict;
-        # preserve the historical behaviour (keep the first value, warn).
-        leftover = remainder.strip()
-        logger.warning(
-            "LLM response had %d chars of extra data after a non-object JSON root; using the "
-            "first value and ignoring the remainder (trailing_preview=%r)",
-            len(leftover),
-            leftover[:120].replace("\n", " "),
-        )
-        return obj
-
     merged: dict[str, Any] = obj
     object_count = 1
     pos = end

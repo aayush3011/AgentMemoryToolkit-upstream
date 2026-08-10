@@ -7,6 +7,7 @@ aio pipelines share one implementation. A single test file covers both.
 from __future__ import annotations
 
 from azure.cosmos.agent_memory.services._pipeline_helpers import (
+    created_at_sort_key,
     deterministic_episode_id,
     find_episode_boundary,
     is_valid_time_pair,
@@ -72,6 +73,36 @@ class TestTimeHelpers:
             "2025-01-01T09:00:00+05:00",
             "2025-01-01T05:00:00Z",
         )
+
+
+class TestCreatedAtSortKey:
+    def test_tied_timestamps_break_deterministically_on_id(self) -> None:
+        # Turns sharing one timestamp (common when many turns carry the same
+        # session date) must keep a stable, id-ordered sequence so the segment's
+        # first/last ids - and thus the deterministic episode id - do not drift.
+        items = [
+            {"id": "c", "created_at": "2025-01-01T00:00:00+00:00"},
+            {"id": "a", "created_at": "2025-01-01T00:00:00+00:00"},
+            {"id": "b", "created_at": "2025-01-01T00:00:00+00:00"},
+        ]
+        assert [i["id"] for i in sorted(items, key=created_at_sort_key)] == ["a", "b", "c"]
+
+    def test_mixed_offsets_sort_by_true_instant_not_lexical(self) -> None:
+        # 09:00+05:00 (=04:00Z) precedes 05:00Z chronologically, though the raw
+        # string "09..." sorts after "05..." lexically.
+        items = [
+            {"id": "later", "created_at": "2025-01-01T05:00:00Z"},
+            {"id": "earlier", "created_at": "2025-01-01T09:00:00+05:00"},
+        ]
+        assert [i["id"] for i in sorted(items, key=created_at_sort_key)] == ["earlier", "later"]
+
+    def test_missing_or_unparseable_sorts_last_by_id(self) -> None:
+        items = [
+            {"id": "no-ts"},
+            {"id": "bad-ts", "created_at": "not-a-date"},
+            {"id": "has-ts", "created_at": "2025-01-01T00:00:00Z"},
+        ]
+        assert [i["id"] for i in sorted(items, key=created_at_sort_key)] == ["has-ts", "bad-ts", "no-ts"]
 
 
 class TestFindEpisodeBoundary:

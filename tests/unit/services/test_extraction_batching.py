@@ -29,6 +29,27 @@ class TestIsRetryableLLMError:
         # Conservative: never quarantine (drop) turns on an unclassified error.
         assert is_retryable_llm_error(Exception("something weird happened")) is True
 
+    def test_programming_errors_are_non_retryable(self) -> None:
+        # A bug in our own parse/extract code (e.g. .get on a non-dict) is
+        # deterministic - retrying re-fails identically and would wedge the
+        # segment/batch forever. Classify by type as non-retryable so it is
+        # quarantined and surfaced instead of deferred indefinitely.
+        assert is_retryable_llm_error(AttributeError("'list' object has no attribute 'get'")) is False
+        assert is_retryable_llm_error(KeyError("episodes")) is False
+        assert is_retryable_llm_error(TypeError("unhashable type")) is False
+        assert is_retryable_llm_error(IndexError("list index out of range")) is False
+
+    def test_programming_error_type_beats_retryable_looking_message(self) -> None:
+        # Type wins over text: a programming error stays non-retryable even when
+        # its message would otherwise look transient.
+        assert is_retryable_llm_error(KeyError("429 rate limit")) is False
+
+    def test_transient_provider_error_stays_retryable(self) -> None:
+        # Genuine transient provider failures are their own SDK exception types
+        # (not the programming-error allow-list) and must remain retryable - the
+        # allow-list is deliberately narrow, NOT "any non-LLMError".
+        assert is_retryable_llm_error(RuntimeError("Error code: 429 - rate limit")) is True
+
 
 class TestBatchTurnsByTokens:
     def _turns(self, n, content="word " * 10):

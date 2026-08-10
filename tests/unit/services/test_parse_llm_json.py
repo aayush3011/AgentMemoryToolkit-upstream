@@ -94,3 +94,30 @@ class TestGenuineErrors:
             parse_llm_json("I could not find any memories.")
         assert "invalid JSON" in str(exc.value)
         assert "TRUNCATED" not in str(exc.value)
+
+
+class TestNonObjectRoot:
+    """A non-object JSON root must raise LLMError, not leak a non-dict.
+
+    Callers immediately do ``parsed.get("facts"/"episodes")``; a bare list/scalar
+    would raise AttributeError downstream, which the extraction error-handlers
+    then misclassify as a transient (retryable) failure and defer forever.
+    """
+
+    def test_bare_array_root_raises(self) -> None:
+        with pytest.raises(LLMError) as exc:
+            parse_llm_json('[{"text": "x"}]')
+        assert "non-object JSON root" in str(exc.value)
+
+    def test_bare_array_root_with_trailing_data_raises(self) -> None:
+        with pytest.raises(LLMError) as exc:
+            parse_llm_json('[1, 2] {"a": 1}')
+        assert "non-object JSON root" in str(exc.value)
+
+    def test_scalar_number_root_raises(self) -> None:
+        with pytest.raises(LLMError):
+            parse_llm_json("42")
+
+    def test_scalar_string_root_raises(self) -> None:
+        with pytest.raises(LLMError):
+            parse_llm_json('"just a sentence"')

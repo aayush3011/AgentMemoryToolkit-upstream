@@ -59,6 +59,7 @@ from azure.cosmos.agent_memory.services._pipeline_helpers import (
     cap_structured_summary,
     chat_text,
     clamp_unit_interval,
+    created_at_sort_key,
     deterministic_episode_id,
     extract_memories_prompt_file,
     find_episode_boundary,
@@ -935,7 +936,7 @@ class PipelineService:
                 partition_key=[user_id, thread_id],
             )
         )
-        items.sort(key=lambda m: m.get("created_at", ""))
+        items.sort(key=created_at_sort_key)
         return items
 
     def _episode_segment_embeddings(self, segment: list[dict[str, Any]]) -> list[list[float]]:

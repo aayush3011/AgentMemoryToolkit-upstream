@@ -191,3 +191,43 @@ async def test_idle_gap_below_min_turns_still_flushes_as_one_episode(monkeypatch
 
     assert result == {"episodes": 1}
     assert _stamped(turns_store) == ["turn-1", "turn-2", "turn-3"]
+
+
+@pytest.mark.asyncio
+async def test_extract_episodes_defers_segment_on_retryable_error(monkeypatch) -> None:
+    monkeypatch.setenv("EPISODE_IDLE_GAP_SECONDS", "120")
+    monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
+    monkeypatch.setenv("EPISODE_MAX_TURNS", "40")
+    turns = [_turn_at(1, 1), _turn_at(2, 2), _turn_at(3, 30)]  # gap closes [1,2]
+    service, memories, turns_store, _ = _service(turns)
+
+    async def _boom(*a: Any, **k: Any) -> str:
+        raise RuntimeError("transient rate limit 429")
+
+    service._run_prompty = _boom  # type: ignore[assignment]
+
+    result = await service.extract_episodes("u1", "t1")
+
+    assert result == {"episodes": 0}
+    assert _episodes(memories) == []
+    assert _stamped(turns_store) == []  # un-stamped -> retried next run
+
+
+@pytest.mark.asyncio
+async def test_extract_episodes_quarantines_segment_on_non_retryable_error(monkeypatch) -> None:
+    monkeypatch.setenv("EPISODE_IDLE_GAP_SECONDS", "120")
+    monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
+    monkeypatch.setenv("EPISODE_MAX_TURNS", "40")
+    turns = [_turn_at(1, 1), _turn_at(2, 2), _turn_at(3, 30)]
+    service, memories, turns_store, _ = _service(turns)
+
+    async def _boom(*a: Any, **k: Any) -> str:
+        raise RuntimeError("content_filter triggered")
+
+    service._run_prompty = _boom  # type: ignore[assignment]
+
+    result = await service.extract_episodes("u1", "t1")
+
+    assert result == {"episodes": 0}
+    assert _episodes(memories) == []
+    assert _stamped(turns_store) == ["turn-1", "turn-2"]  # quarantined + advanced
