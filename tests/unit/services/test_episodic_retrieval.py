@@ -83,10 +83,13 @@ def test_search_cosmos_base_is_facts_only_no_episodes_without_optin() -> None:
     store.search_episodic.assert_not_called()
 
 
-def test_search_cosmos_include_episodes_uses_separate_budget_facts_first() -> None:
+def test_search_cosmos_include_episodes_combines_facts_and_episodes_in_base_query() -> None:
     store = MagicMock()
-    store.search.return_value = [{"id": "fact", "content": "fact", "type": "fact"}]
-    store.search_episodic.return_value = [{"id": "episode", "content": "episode", "type": "episodic"}]
+    # A single combined query returns facts + episodes ranked together.
+    store.search.return_value = [
+        {"id": "fact", "content": "fact", "type": "fact"},
+        {"id": "episode", "content": "episode", "type": "episodic"},
+    ]
     store.search_summaries.return_value = [{"id": "summary", "content": "summary", "type": "thread_summary"}]
     store.search_turns.return_value = [{"id": "turn", "content": "turn", "type": "turn"}]
     client = _client_with_store(store)
@@ -97,17 +100,17 @@ def test_search_cosmos_include_episodes_uses_separate_budget_facts_first() -> No
         thread_id="t1",
         top_k=100,
         include_episodes=True,
-        episode_top_k=20,
         include_summaries=True,
         include_turns=True,
     )
 
-    # Default order: facts -> episodes -> summaries -> turns.
+    # Combined base (facts + episodes) -> summaries -> turns.
     assert [doc["id"] for doc in result] == ["fact", "episode", "summary", "turn"]
-    # Facts keep their full top_k; episodes get their own separate budget.
+    # One query, one shared top_k budget; episodic is folded into the base types.
     assert store.search.call_args.kwargs["top_k"] == 100
-    assert store.search.call_args.kwargs["memory_types"] == ["fact"]
-    assert store.search_episodic.call_args.kwargs["top_k"] == 20
+    assert store.search.call_args.kwargs["memory_types"] == ["fact", "episodic"]
+    # No separate episodic query is issued.
+    store.search_episodic.assert_not_called()
 
 
 class _RankedEpisodeContainer:

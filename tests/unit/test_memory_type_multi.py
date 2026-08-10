@@ -6,9 +6,9 @@ forward to it: ``search_cosmos``, ``get_memories``, ``get_thread``.
 A non-empty list emits ``c.type IN (@memory_type_0, @memory_type_1, ...)``.
 ``None`` (default) or an empty list disables the type filter at the
 ``_build_memory_query_builder`` level. Note ``search_cosmos`` overrides this:
-its base search is facts-only (episodic is stripped and episodes are served
-exclusively via ``include_episodes``), so None/empty there resolves to
-``["fact"]``.
+its base search defaults to facts, and ``episodic`` is folded into the same
+base query only when ``include_episodes=True`` (no separate episodic query),
+so None/empty there resolves to ``["fact"]``.
 """
 
 from __future__ import annotations
@@ -186,9 +186,10 @@ def test_get_thread_does_not_accept_memory_types():
         client.get_thread(thread_id="t1", memory_types=["turn", "thread_summary"])
 
 
-def test_search_cosmos_threads_non_episodic_types_and_strips_episodic():
-    """search_cosmos threads non-episodic memory types through to the WHERE, but
-    strips episodic - episodes enter the result set only via include_episodes."""
+def test_search_cosmos_threads_non_episodic_types_and_excludes_episodic_without_optin():
+    """search_cosmos threads non-episodic memory types through to the WHERE, and
+    excludes episodic unless include_episodes is set - so episodes join the base
+    query only when explicitly requested."""
     client, container = _connected_client()
     client._embeddings_client = MagicMock()
     client._embeddings_client.generate.return_value = [0.0] * 8
@@ -198,7 +199,7 @@ def test_search_cosmos_threads_non_episodic_types_and_strips_episodic():
         memory_types=["fact", "procedural", "episodic"],
     )
     query = _captured_query(container)
-    # episodic dropped -> only fact + procedural remain.
+    # episodic dropped (no include_episodes) -> only fact + procedural remain.
     assert "c.type IN (@memory_type_0, @memory_type_1)" in query
     params = {p["name"]: p["value"] for p in _captured_params(container)}
     type_values = {v for k, v in params.items() if k.startswith("@memory_type")}
@@ -207,10 +208,29 @@ def test_search_cosmos_threads_non_episodic_types_and_strips_episodic():
     assert "episodic" not in type_values
 
 
+def test_search_cosmos_include_episodes_adds_episodic_to_base_query():
+    """include_episodes folds ``episodic`` into the single base query alongside
+    the caller's other non-episodic types (no separate episodic query)."""
+    client, container = _connected_client()
+    client._embeddings_client = MagicMock()
+    client._embeddings_client.generate.return_value = [0.0] * 8
+    client.search_cosmos(
+        search_terms="user preferences",
+        user_id="u1",
+        memory_types=["fact", "procedural"],
+        include_episodes=True,
+    )
+    query = _captured_query(container)
+    assert "c.type IN (@memory_type_0, @memory_type_1, @memory_type_2)" in query
+    params = {p["name"]: p["value"] for p in _captured_params(container)}
+    type_values = {v for k, v in params.items() if k.startswith("@memory_type")}
+    assert type_values == {"fact", "procedural", "episodic"}
+
+
 def test_search_cosmos_empty_or_none_types_default_to_facts_only():
-    """With episodes served only via include_episodes, the base search is
-    facts-only: empty/None memory_types resolve to a fact type filter, never
-    'all types' (which would leak episodes into the base result)."""
+    """With include_episodes off, the base search is facts-only: empty/None
+    memory_types resolve to a fact type filter, never 'all types' (which would
+    leak episodes into the base result)."""
     client, container = _connected_client()
     client._embeddings_client = MagicMock()
     client._embeddings_client.generate.return_value = [0.0] * 8

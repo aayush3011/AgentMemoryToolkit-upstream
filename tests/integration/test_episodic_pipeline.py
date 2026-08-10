@@ -183,7 +183,6 @@ def test_live_episodic_extraction_and_blended_search(
             search_terms="the hiking trip",
             user_id=unique_user_id,
             include_episodes=True,
-            episode_top_k=5,
         )
         assert any(result.get("type") == "episodic" for result in results), results
     finally:

@@ -199,14 +199,13 @@ def main() -> None:
         episodes = mem.get_episodes(user_id)
         print_episodes(episodes)
 
-        banner("4. Blended search (facts + opt-in episodes with their own budget)")
-        # Base search is facts-only; episodes are opt-in via include_episodes and
-        # get their own episode_top_k budget so they never dilute the fact set.
+        banner("4. Blended search (facts + episodes in one combined query)")
+        # With include_episodes, facts and episodes are returned by a single
+        # ranked query sharing one top_k budget (no separate episodic query).
         results = mem.search_cosmos(
             search_terms="Colchuck Lake hiking outcome",
             user_id=user_id,
             include_episodes=True,
-            episode_top_k=5,
         )
         print_search_results(results)
 

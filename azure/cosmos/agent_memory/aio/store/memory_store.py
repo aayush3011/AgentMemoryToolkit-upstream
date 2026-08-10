@@ -197,11 +197,10 @@ class AsyncMemoryStore:
             if memory_type == "fact":
                 meta.setdefault("category", "unclassified:manual")
             elif memory_type == "episodic":
-                kwargs.setdefault("title", meta.get("title") or content[:80] or "Manual episode")
-                kwargs.setdefault("participants", [])
+                kwargs.setdefault("title", content[:80] or "Manual episode")
                 kwargs.setdefault("events", [])
-                kwargs.setdefault("outcome", None)
-                kwargs.setdefault("lessons", [content] if content else [])
+                kwargs.setdefault("participants", [])
+                kwargs.setdefault("lessons", [])
                 kwargs.setdefault("source_turn_ids", [])
             elif memory_type == "procedural":
                 kwargs.setdefault("source_fact_ids", ["manual"])
@@ -1100,12 +1099,20 @@ class AsyncMemoryStore:
         min_salience: Optional[float] = None,
         include_superseded: bool = False,
         thread_id: Optional[str] = None,
+        tags_all: Optional[list[str]] = None,
+        tags_any: Optional[list[str]] = None,
+        exclude_tags: Optional[list[str]] = None,
         created_after: Optional[str | datetime] = None,
         created_before: Optional[str | datetime] = None,
-        started_at: Optional[str | datetime] = None,
-        ended_at: Optional[str | datetime] = None,
+        started_after: Optional[str | datetime] = None,
+        started_before: Optional[str | datetime] = None,
+        ended_after: Optional[str | datetime] = None,
+        ended_before: Optional[str | datetime] = None,
     ) -> list[dict[str, Any]]:
-        """Vector + full-text search over episodic ``content`` for a user."""
+        """Semantic search across episodic memories for a user.
+
+        Temporal arguments are filters only; relevance ranking is vector/FTS-only.
+        """
         if not user_id:
             raise ValidationError("user_id is required for search_episodic")
         terms = require_search_terms(search_terms)
@@ -1114,9 +1121,10 @@ class AsyncMemoryStore:
         keywords = extract_keywords(terms)
 
         qb = _QueryBuilder()
+        qb.add_filter("c.type", "@type", "episodic")
         qb.add_filter("c.user_id", "@user_id", user_id)
         qb.add_filter("c.thread_id", "@thread_id", thread_id)
-        qb.add_filter("c.type", "@type", "episodic")
+        add_tag_filters(qb, tags_all=tags_all, tags_any=tags_any, exclude_tags=exclude_tags)
         qb.add_time_range(
             "c.created_at",
             after=_coerce_datetime_iso(created_after),
@@ -1126,13 +1134,17 @@ class AsyncMemoryStore:
         )
         qb.add_time_range(
             "c.started_at",
-            after=_coerce_datetime_iso(started_at),
-            after_param="@started_at",
+            after=_coerce_datetime_iso(started_after),
+            before=_coerce_datetime_iso(started_before),
+            after_param="@started_after",
+            before_param="@started_before",
         )
         qb.add_time_range(
             "c.ended_at",
-            before=_coerce_datetime_iso(ended_at),
-            before_param="@ended_at",
+            after=_coerce_datetime_iso(ended_after),
+            before=_coerce_datetime_iso(ended_before),
+            after_param="@ended_after",
+            before_param="@ended_before",
         )
         add_salience_filter(qb, min_salience)
 

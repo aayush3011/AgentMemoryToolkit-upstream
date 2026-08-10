@@ -95,28 +95,70 @@ async def test_async_search_cosmos_base_is_facts_only_no_episodes_without_optin(
     store.search_episodic.assert_not_awaited()
 
 
-async def test_async_search_cosmos_include_episodes_separate_budget_and_ordering():
+async def test_async_search_cosmos_include_episodes_combines_facts_and_episodes_in_base_query():
     mem, _ = _connected_client()
     store = MagicMock()
-    store.search = AsyncMock(return_value=[{"content": "fact A", "type": "fact"}])
-    store.search_episodic = AsyncMock(return_value=[{"content": "episode C", "type": "episodic"}])
+    store.search = AsyncMock(
+        return_value=[
+            {"content": "fact A", "type": "fact"},
+            {"content": "episode C", "type": "episodic"},
+        ]
+    )
+    store.search_episodic = AsyncMock()
     store.search_summaries = AsyncMock(return_value=[{"content": "summary B", "type": "thread_summary"}])
     store.search_turns = AsyncMock(return_value=[{"content": "turn D", "type": "turn"}])
     mem._get_store = MagicMock(return_value=store)
 
-    facts_first = await mem.search_cosmos(
+    results = await mem.search_cosmos(
         "weather",
         user_id="u1",
         thread_id="t1",
         top_k=100,
         include_episodes=True,
-        episode_top_k=20,
         include_summaries=True,
         include_turns=True,
     )
-    assert [doc["content"] for doc in facts_first] == ["fact A", "episode C", "summary B", "turn D"]
+    # Combined base (facts + episodes) -> summaries -> turns; one shared budget.
+    assert [doc["content"] for doc in results] == ["fact A", "episode C", "summary B", "turn D"]
     assert store.search.call_args.kwargs["top_k"] == 100
-    assert store.search_episodic.call_args.kwargs["top_k"] == 20
+    assert store.search.call_args.kwargs["memory_types"] == ["fact", "episodic"]
+    store.search_episodic.assert_not_awaited()
+
+
+async def test_async_search_cosmos_include_episodes_combined_query_hits_real_store():
+    # Drive the REAL AsyncMemoryStore.search (not a mock) through search_cosmos:
+    # include_episodes folds "episodic" into a single combined base query that
+    # applies the caller's tag/salience filters uniformly - no separate episodic
+    # query, so facts and episodes share one top_k and the same filters.
+    memories = MagicMock()
+    memories.query_items = MagicMock(return_value=AsyncIterator([]))
+    embeddings = MagicMock()
+    embeddings.generate = AsyncMock(return_value=[0.1, 0.2])
+    store = AsyncMemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings)
+
+    mem, _ = _connected_client()
+    mem._get_store = MagicMock(return_value=store)
+
+    results = await mem.search_cosmos(
+        "weather",
+        user_id="u1",
+        thread_id="t1",
+        top_k=5,
+        include_episodes=True,
+        tags_all=["trip"],
+        min_salience=0.5,
+    )
+
+    assert results == []
+    # Exactly one combined base query ran, scoped to fact + episodic, with the
+    # caller's filters applied uniformly.
+    assert memories.query_items.call_count == 1
+    call_kwargs = memories.query_items.call_args.kwargs
+    params = _params_by_name(call_kwargs)
+    type_values = {v for k, v in params.items() if k.startswith("@memory_type")}
+    assert type_values == {"fact", "episodic"}
+    assert params["@min_salience"] == 0.5
+    assert params["@tag_0"] == "trip"
 
 
 async def test_async_search_episodic_temporal_filters_do_not_rank_by_time():
@@ -133,21 +175,21 @@ async def test_async_search_episodic_temporal_filters_do_not_rank_by_time():
         top_k=3,
         created_after=created_after,
         created_before="2026-02-01T00:00:00+00:00",
-        started_at="2026-01-10T00:00:00+00:00",
-        ended_at="2026-01-20T00:00:00+00:00",
+        started_after="2026-01-10T00:00:00+00:00",
+        ended_before="2026-01-20T00:00:00+00:00",
     )
 
     call_kwargs = memories.query_items.call_args.kwargs
     query = call_kwargs["query"]
     assert "c.created_at >= @created_after" in query
     assert "c.created_at <= @created_before" in query
-    assert "c.started_at >= @started_at" in query
-    assert "c.ended_at <= @ended_at" in query
+    assert "c.started_at >= @started_after" in query
+    assert "c.ended_at <= @ended_before" in query
     assert "ORDER BY RANK RRF(VectorDistance(c.embedding, @embedding), FullTextScore(c.content, @kw0, @kw1))" in query
     assert "ORDER BY c.created_at" not in query
     assert "ORDER BY c.started_at" not in query
     params = _params_by_name(call_kwargs)
     assert params["@created_after"] == created_after.isoformat()
     assert params["@created_before"] == "2026-02-01T00:00:00+00:00"
-    assert params["@started_at"] == "2026-01-10T00:00:00+00:00"
-    assert params["@ended_at"] == "2026-01-20T00:00:00+00:00"
+    assert params["@started_after"] == "2026-01-10T00:00:00+00:00"
+    assert params["@ended_before"] == "2026-01-20T00:00:00+00:00"

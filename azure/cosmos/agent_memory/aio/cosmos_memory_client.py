@@ -710,7 +710,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         created_after: Optional[str | datetime] = None,
         created_before: Optional[str | datetime] = None,
         include_episodes: bool = False,
-        episode_top_k: Optional[int] = None,
         include_turns: bool = False,
         turn_top_k: Optional[int] = None,
         include_summaries: bool = False,
@@ -718,14 +717,22 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
     ) -> list[dict[str, Any]]:
         """Search memories using vector similarity, with optional retrieval blending.
 
-        Facts-only base + opt-in episodes (own budget). Order: facts -> episodes
-        -> summaries -> turns. See the sync client for full details."""
+        Facts + episodes in a single ranked query sharing one ``top_k`` budget
+        when ``include_episodes`` is True; facts only when False. Callers may
+        pass ``memory_types`` for other non-episodic types (``episodic`` is added
+        or removed by ``include_episodes``). Optional summaries/turns blend in
+        after the base block. See the sync client for full details."""
         store = self._get_store()
-        # Hard-scope the base search to facts: episodes are served exclusively by
-        # the include_episodes pass (with its own budget), never through the base.
-        base_memory_types = memory_types if memory_types is not None else ["fact"]
-        base_memory_types = [t for t in base_memory_types if t != "episodic"] or ["fact"]
-        facts = await store.search(
+        # Facts + episodes share one ranked query and one top_k budget: episodic
+        # is added when include_episodes is True and stripped when it is False.
+        if memory_types is not None:
+            base_memory_types = [t for t in memory_types if t != "episodic"]
+        else:
+            base_memory_types = ["fact"]
+        if include_episodes:
+            base_memory_types = [*base_memory_types, "episodic"]
+        base_memory_types = base_memory_types or ["fact"]
+        base = await store.search(
             search_terms=search_terms,
             memory_id=memory_id,
             user_id=user_id,
@@ -743,7 +750,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             created_before=created_before,
         )
         if not user_id:
-            return facts
+            return base
 
         results: list[dict[str, Any]] = []
         seen_content: set[str] = set()
@@ -755,28 +762,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                     seen_content.add(content)
                     results.append(doc)
 
-        episodes: list[dict[str, Any]] = []
-        if include_episodes:
-            try:
-                episodes = await store.search_episodic(
-                    user_id=user_id,
-                    search_terms=search_terms,
-                    thread_id=thread_id,
-                    top_k=episode_top_k if episode_top_k is not None else top_k,
-                    min_salience=min_salience,
-                    tags_all=tags_all,
-                    tags_any=tags_any,
-                    exclude_tags=exclude_tags,
-                    include_superseded=include_superseded,
-                    created_after=created_after,
-                    created_before=created_before,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("search_cosmos: include_episodes search failed (%s); skipping episodes", exc)
-                episodes = []
-
-        _extend(facts)
-        _extend(episodes)
+        _extend(base)
 
         if include_summaries:
             try:
