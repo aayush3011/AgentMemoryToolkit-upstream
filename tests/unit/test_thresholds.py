@@ -156,6 +156,19 @@ def test_dedup_pool_size_rejects_zero(monkeypatch: pytest.MonkeyPatch) -> None:
     assert thresholds.get_dedup_pool_size() == 50
 
 
+@pytest.mark.parametrize("bad_value", ["nan", "inf", "-inf", "-1"])
+def test_episode_topic_drift_rejects_non_finite_and_negative(monkeypatch: pytest.MonkeyPatch, bad_value: str) -> None:
+    monkeypatch.setenv("EPISODE_TOPIC_DRIFT", bad_value)
+
+    assert thresholds.get_episode_topic_drift() == thresholds.DEFAULT_EPISODE_TOPIC_DRIFT
+
+
+def test_episode_topic_drift_accepts_valid_float(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0.35")
+
+    assert thresholds.get_episode_topic_drift() == 0.35
+
+
 def test_procedural_synthesis_auto_invalid_uses_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("PROCEDURAL_SYNTHESIS_AUTO", "bogus")
 

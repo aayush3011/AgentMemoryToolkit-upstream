@@ -15,8 +15,8 @@ from azure.cosmos.agent_memory.chat import (
     RETRYABLE_STATUS_CODES,
     TOKEN_SCOPE,
     extract_content,
-    retry_delay,
     resolve_api_version,
+    retry_delay,
     unsupported_param,
 )
 from azure.cosmos.agent_memory.exceptions import ConfigurationError

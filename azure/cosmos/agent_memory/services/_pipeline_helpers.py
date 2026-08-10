@@ -520,9 +520,7 @@ def default_prompts_dir() -> str:
 
 
 _EXTRACT_MEMORIES_PROMPT_DEFAULT = "extract_memories-v2.prompty"
-_EXTRACT_MEMORIES_PROMPT_ALLOWED = frozenset(
-    {"extract_memories.prompty", "extract_memories-v2.prompty"}
-)
+_EXTRACT_MEMORIES_PROMPT_ALLOWED = frozenset({"extract_memories.prompty", "extract_memories-v2.prompty"})
 
 
 def extract_memories_prompt_file() -> str:

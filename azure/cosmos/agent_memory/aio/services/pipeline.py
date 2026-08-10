@@ -591,9 +591,7 @@ class AsyncPipelineService:
         for batch in batches:
             batch_transcript = self._build_transcript(batch, include_timestamp=True)
             try:
-                response_text = await self._run_prompty(
-                    extract_prompt, inputs={"transcript": batch_transcript}
-                )
+                response_text = await self._run_prompty(extract_prompt, inputs={"transcript": batch_transcript})
                 parsed = self._parse_llm_json(response_text)
                 facts.extend(parsed.get("facts", []))
                 processed_turns.extend(batch)

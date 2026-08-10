@@ -38,10 +38,18 @@ class TestDoubledAndTrailing:
     def test_fenced_object_with_trailing_duplicate(self) -> None:
         assert parse_llm_json('```json\n{"a": 1}\n``` {"a": 1}') == {"a": 1}
 
-    def test_trailing_data_emits_warning(self, caplog: pytest.LogCaptureFixture) -> None:
-        with caplog.at_level(logging.WARNING, logger=_HELPER_LOGGER):
+    def test_doubled_object_emits_merge_info(self, caplog: pytest.LogCaptureFixture) -> None:
+        # Two clean concatenated objects are merged (so no items are dropped);
+        # this is a recoverable case logged at INFO, not a warning.
+        with caplog.at_level(logging.INFO, logger=_HELPER_LOGGER):
             parse_llm_json(_DOUBLED)
-        assert any("extra data after the first JSON object" in r.message for r in caplog.records)
+        assert any("concatenated JSON objects" in r.message for r in caplog.records)
+
+    def test_trailing_garbage_emits_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        # A valid object followed by non-JSON garbage is salvaged but warned.
+        with caplog.at_level(logging.WARNING, logger=_HELPER_LOGGER):
+            parse_llm_json('{"facts": [{"text": "x"}]} <end of turn>')
+        assert any("non-JSON trailing data" in r.message for r in caplog.records)
 
     def test_clean_object_emits_no_warning(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.WARNING, logger=_HELPER_LOGGER):

@@ -8,6 +8,7 @@ keys, so a single setting flips both.
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Optional
 
@@ -141,6 +142,14 @@ def _parse_threshold_float(name: str, default: float) -> float:
         parsed = float(raw)
     except (ValueError, TypeError):
         logger.warning("Invalid value for %s=%r, using default %s", name, raw, default)
+        return default
+    if not math.isfinite(parsed):
+        logger.warning(
+            "Non-finite value for %s=%r is not allowed; using default %s",
+            name,
+            raw,
+            default,
+        )
         return default
     if parsed < 0:
         logger.warning(
