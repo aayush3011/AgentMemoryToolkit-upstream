@@ -157,7 +157,7 @@ Automatic processing requires these settings in the Functions app or `local.sett
 "USER_SUMMARY_EVERY_N": "10"
 ```
 
-Set a threshold to `"0"` to disable that processing type. `MEMORY_PROCESSOR_OWNER` must be `"durable"` for the Function App's change-feed trigger to actually fire — leave it unset (or set to `"inprocess"`) for SDK-only deployments.
+Set a threshold to `"0"` to disable that processing type. `MEMORY_PROCESSOR_OWNER` must be `"durable"` for the Function App's change-feed trigger to actually fire - leave it unset (or set to `"inprocess"`) for SDK-only deployments.
 
 Cosmos DB memory documents store their category in the JSON `type` field. Only documents with `type: "turn"` increment counters. Derived memories with `type: "thread_summary"`, `type: "fact"`, `type: "episodic"`, `type: "procedural"`, or `type: "user_summary"` do not trigger threshold counts.
 

@@ -1,5 +1,5 @@
 // Cosmos DB NoSQL serverless account + database + containers for the Agent
-// Memory Toolkit. Single-file module — no `existing` keyword tricks because
+// Memory Toolkit. Single-file module - no `existing` keyword tricks because
 // the account is always created fresh by this template.
 
 @description('Name of the Cosmos account to create.')

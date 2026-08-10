@@ -698,14 +698,14 @@ class PipelineService:
                 "type": "fact",
                 "content": text,
                 "content_hash": new_content_hash,
-                "confidence": 0.5 if confidence is None else confidence,
+                "confidence": clamp_unit_interval(confidence, 0.5),
                 **self._prompt_lineage(extract_prompt),
                 "metadata": {
                     "category": fact.get("category") or "other",
                     "temporal_context": fact.get("temporal_context"),
                     "source": fact_source,
                 },
-                "salience": fact.get("salience") if fact.get("salience") is not None else 0.5,
+                "salience": clamp_unit_interval(fact.get("salience"), 0.5),
                 "tags": ["sys:fact", "sys:auto-extracted"] + source_tags + topic_tags,
                 "created_at": doc_timestamp,
                 "updated_at": doc_timestamp,
@@ -1032,16 +1032,44 @@ class PipelineService:
             first_id = str(closing[0].get("id") or "")
             last_id = str(closing[-1].get("id") or "")
             segment_key = _ID_SEED_SEP.join((user_id, thread_id, first_id, last_id))
-            docs = self._build_episode_docs(user_id, thread_id, closing, segment_key=segment_key)
-            if docs:
-                embeddings_for_docs = self._embed_batch([str(doc["content"]) for doc in docs])
-                for doc, embedding in zip(docs, embeddings_for_docs):
-                    doc["embedding"] = embedding
-                    try:
-                        self._create_memory(doc)
-                        total += 1
-                    except CosmosResourceExistsError:
-                        logger.info("extract_episodes idempotent skip duplicate episode id=%s", doc.get("id"))
+            try:
+                docs = self._build_episode_docs(user_id, thread_id, closing, segment_key=segment_key)
+                embeddings_for_docs = self._embed_batch([str(doc["content"]) for doc in docs]) if docs else []
+            except Exception as exc:  # noqa: BLE001
+                if is_retryable_llm_error(exc):
+                    # Transient provider error: leave the segment un-stamped and stop
+                    # this run so it is retried intact next time (mirror of the fact path).
+                    logger.warning(
+                        "extract_episodes: deferring %d turns after retryable extraction error "
+                        "(will retry next run) user_id=%s thread_id=%s err=%s",
+                        len(closing),
+                        user_id,
+                        thread_id,
+                        exc,
+                    )
+                    break
+                # Non-retryable (e.g. content filter, context-length): quarantine the
+                # poison segment - stamp it so it never re-poisons future runs and the
+                # open segment cannot grow without bound - then advance to the next.
+                logger.warning(
+                    "extract_episodes: quarantining %d turns after non-retryable extraction error "
+                    "(marking episode_extracted_at so they do not re-poison future runs) "
+                    "user_id=%s thread_id=%s err=%s",
+                    len(closing),
+                    user_id,
+                    thread_id,
+                    exc,
+                )
+                self._mark_turns_extracted(closing, field="episode_extracted_at")
+                segment = segment[boundary:]
+                continue
+            for doc, embedding in zip(docs, embeddings_for_docs):
+                doc["embedding"] = embedding
+                try:
+                    self._create_memory(doc)
+                    total += 1
+                except CosmosResourceExistsError:
+                    logger.info("extract_episodes idempotent skip duplicate episode id=%s", doc.get("id"))
             # Advance the episode watermark so the closed turns leave the open
             # segment even when the segment yielded no episode (nothing episodic
             # to remember) - otherwise they would be re-evaluated forever.
@@ -1327,10 +1355,7 @@ class PipelineService:
             validated = self._validate_extracted_doc(doc)
             doc_type = validated.get("type")
             try:
-                if doc_type == "episodic":
-                    self._upsert_memory(validated)
-                else:
-                    self._create_memory(validated)
+                self._create_memory(validated)
             except CosmosResourceExistsError:
                 logger.info("persist_extracted_memories skipped existing id=%s", validated.get("id"))
                 continue

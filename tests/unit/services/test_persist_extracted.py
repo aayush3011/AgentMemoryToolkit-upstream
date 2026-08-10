@@ -131,6 +131,30 @@ def _fact_doc(content: str = "The user prefers dark mode.") -> dict[str, Any]:
     }
 
 
+def _episodic_doc(content: str = "The user debugged a flaky CI test together with the agent.") -> dict[str, Any]:
+    content_hash = compute_content_hash(content)
+    seed = ID_SEED_SEP.join(("u1", "t1", content_hash))
+    return {
+        "id": f"ep_{hashlib.sha256(seed.encode()).hexdigest()[:32]}",
+        "user_id": "u1",
+        "thread_id": "t1",
+        "type": "episodic",
+        "title": "CI flake debugging",
+        "content": content,
+        "content_hash": content_hash,
+        "started_at": "2025-01-01T00:00:00+00:00",
+        "ended_at": "2025-01-01T00:05:00+00:00",
+        "confidence": 0.8,
+        "salience": 0.7,
+        "tags": ["sys:episodic"],
+        "prompt_id": "extract_episode.prompty",
+        "prompt_version": "v1",
+        "metadata": {},
+        "created_at": "2025-01-01T00:00:00+00:00",
+        "updated_at": "2025-01-01T00:00:00+00:00",
+    }
+
+
 def test_persist_extracted_memories_uses_deterministic_ids_and_skips_replay() -> None:
     container = _Container()
     store = _Store(container)
@@ -196,6 +220,29 @@ def test_persist_extracted_memories_409_skip_continues_to_next_doc() -> None:
     assert container.created_ids == [second["id"]]
 
 
+def test_persist_extracted_memories_episodic_creates_not_upserts_and_skips_replay() -> None:
+    # Episodic docs persist via create + 409 (first-write-wins), matching the
+    # extract_episodes path - never a last-write-wins upsert. A replayed
+    # identical episode is skipped, not overwritten.
+    container = _Container()
+    store = _Store(container)
+    service = PipelineService(
+        store,
+        chat_client=object(),
+        embeddings_client=_Embeddings(),
+        containers=_containers_for_store(store),
+    )
+    doc = _episodic_doc()
+
+    first = service.persist_extracted_memories("u1", {"facts": [], "episodic": [doc], "updates": []})
+    second = service.persist_extracted_memories("u1", {"facts": [], "episodic": [doc], "updates": []})
+
+    assert first["episodic_count"] == 1
+    assert second["episodic_count"] == 0
+    assert container.created_ids == [doc["id"]]
+    assert store.upserts == []
+
+
 @pytest.mark.asyncio
 async def test_async_persist_extracted_memories_uses_deterministic_ids_and_skips_replay() -> None:
     container = _AsyncContainer()
@@ -234,3 +281,26 @@ async def test_async_persist_extracted_memories_409_skip_continues_to_next_doc()
 
     assert result["fact_count"] == 1
     assert container.created_ids == [second["id"]]
+
+
+@pytest.mark.asyncio
+async def test_async_persist_extracted_memories_episodic_creates_not_upserts_and_skips_replay() -> None:
+    # Episodic docs persist via create + 409 (first-write-wins), matching the
+    # extract_episodes path - never a last-write-wins upsert.
+    container = _AsyncContainer()
+    store = _AsyncStore(container)
+    service = AsyncPipelineService(
+        store,
+        chat_client=object(),
+        embeddings_client=_AsyncEmbeddings(),
+        containers=_async_containers_for_store(store),
+    )
+    doc = _episodic_doc()
+
+    first = await service.persist_extracted_memories("u1", {"facts": [], "episodic": [doc], "updates": []})
+    second = await service.persist_extracted_memories("u1", {"facts": [], "episodic": [doc], "updates": []})
+
+    assert first["episodic_count"] == 1
+    assert second["episodic_count"] == 0
+    assert container.created_ids == [doc["id"]]
+    assert store.upserts == []

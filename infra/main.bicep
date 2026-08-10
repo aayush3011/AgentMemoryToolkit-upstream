@@ -1,4 +1,4 @@
-// Agent Memory Toolkit — main entry point.
+// Agent Memory Toolkit - main entry point.
 // See infra/README.md for architecture and operational knobs.
 
 targetScope = 'subscription'
@@ -30,7 +30,7 @@ param principalId string = ''
 ])
 param principalType string = 'User'
 
-@description('Whether to deploy the Function app. Defaults to true. Set false only if you have a strong reason to skip it (Flex Consumption is pay-per-execution — idle cost is ~$0).')
+@description('Whether to deploy the Function app. Defaults to true. Set false only if you have a strong reason to skip it (Flex Consumption is pay-per-execution - idle cost is ~$0).')
 param deployFunctionApp bool = true
 
 @description('Cosmos database name.')

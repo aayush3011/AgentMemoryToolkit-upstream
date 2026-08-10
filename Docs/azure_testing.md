@@ -147,7 +147,7 @@ Set any threshold to `"0"` to disable that processing type.
 
 The `leases` container is provisioned by `create_memory_store()` alongside the `memories` and `counter` containers, so the Function App should be configured to use that existing lease container.
 
-The Function App authenticates to Cosmos DB and Azure OpenAI via its managed identity — there's no shared key or function-key handoff between the SDK and the Function App.
+The Function App authenticates to Cosmos DB and Azure OpenAI via its managed identity - there's no shared key or function-key handoff between the SDK and the Function App.
 
 ---
 
@@ -300,7 +300,7 @@ print(memory.search_cosmos("hello", user_id="user-1"))
 
 ### Durable processing (change-feed driven)
 
-Processing is no longer invoked directly from the SDK — write turns with `add_cosmos()` / `push_to_cosmos()` and the deployed Function App's change-feed trigger fires the `extract_memories`, `thread_summary`, and `user_summary` orchestrators per the configured thresholds.
+Processing is no longer invoked directly from the SDK - write turns with `add_cosmos()` / `push_to_cosmos()` and the deployed Function App's change-feed trigger fires the `extract_memories`, `thread_summary`, and `user_summary` orchestrators per the configured thresholds.
 
 ```python
 # Write enough turns to cross THREAD_SUMMARY_EVERY_N (default 10).

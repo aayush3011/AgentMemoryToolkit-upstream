@@ -195,9 +195,6 @@ class _IdUniqueStore(_TrackingStore):
 
 
 def test_build_episode_docs_id_stable_across_summary_text() -> None:
-    # F1: identity is derived from segment_key + ordinal, never the LLM prose, so
-    # a re-run of the same segment with different summary text still collides on
-    # id. content_hash remains stored (and reflects the prose) but is not identity.
     service, _, _ = _service(
         [
             {"episodes": [_episode(summary="One phrasing of the CI-retry episode.")]},
@@ -221,9 +218,6 @@ def test_build_episode_docs_multiple_episodes_get_distinct_ordinal_ids() -> None
 
 
 def test_extract_episodes_skips_duplicate_when_segment_reprocessed(monkeypatch) -> None:
-    # F1: a crash between persist and turn-stamping leaves the segment open; the
-    # next run re-extracts it (even with different prose), but the deterministic
-    # id collides, so the 409 skip fires and no duplicate episode lands.
     monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
     store = _IdUniqueStore([])
     turns = _Store([_turn(1), _turn(2)])
@@ -251,8 +245,6 @@ def test_extract_episodes_skips_duplicate_when_segment_reprocessed(monkeypatch) 
 
 
 def test_build_episode_docs_falls_back_to_segment_times_on_unparseable_llm_times() -> None:
-    # F2: a non-ISO model timestamp must not drop the episode; fall back to the
-    # grounded segment bounds (from the turns' created_at).
     bad = _episode()
     bad["started_at"] = "March 9th"
     bad["ended_at"] = "2025-01-01T00:02:00+00:00"
@@ -266,9 +258,6 @@ def test_build_episode_docs_falls_back_to_segment_times_on_unparseable_llm_times
 
 
 def test_build_episode_docs_keeps_mixed_tz_llm_times_after_normalization() -> None:
-    # F2: a naive-date + tz-aware pair is now a valid, self-consistent pair (naive
-    # normalized to UTC), so the episode is kept with the model times rather than
-    # dropped on a TypeError.
     mixed = _episode()
     mixed["started_at"] = "2026-03-09"
     mixed["ended_at"] = "2026-03-10T09:08:00+00:00"
@@ -282,8 +271,6 @@ def test_build_episode_docs_keeps_mixed_tz_llm_times_after_normalization() -> No
 
 
 def test_build_episode_docs_keeps_episode_with_padded_timestamps() -> None:
-    # F-A: a leading/trailing-space but otherwise valid timestamp must not drop
-    # the episode; the stored value is stripped and the episode is kept.
     ep = _episode()
     ep["started_at"] = " 2025-01-01T00:01:00+00:00"
     ep["ended_at"] = "2025-01-01T00:02:00+00:00 "
@@ -297,8 +284,6 @@ def test_build_episode_docs_keeps_episode_with_padded_timestamps() -> None:
 
 
 def test_build_episode_docs_clamps_out_of_range_salience_confidence() -> None:
-    # F-A: schema-valid but out-of-range salience/confidence are clamped into
-    # [0,1] rather than dropping the whole episode.
     ep = _episode()
     ep["salience"] = 1.4
     ep["confidence"] = -0.2
@@ -312,8 +297,6 @@ def test_build_episode_docs_clamps_out_of_range_salience_confidence() -> None:
 
 
 def test_build_episode_docs_drops_whitespace_only_summary() -> None:
-    # F-F: sync now matches aio - a whitespace-only summary is dropped, not
-    # persisted as a blank-content episode.
     service, _, _ = _service([{"episodes": [_episode(summary="   ")]}])
 
     docs = service._build_episode_docs("u1", "t1", [_turn(1), _turn(2)], segment_key="seg-1")

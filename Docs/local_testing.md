@@ -263,7 +263,7 @@ Expected functions include:
 - `extract_facts`
 - `generate_user_summary`
 - `http_start`
-- `on_memory_change` (change feed trigger — only active when `COSMOS_DB__accountEndpoint` is set)
+- `on_memory_change` (change feed trigger - only active when `COSMOS_DB__accountEndpoint` is set)
 
 ### Function keys
 
@@ -358,7 +358,7 @@ If you have configured the change feed settings above, you can test automatic pr
 
 1. Set a low threshold for testing, e.g. `THREAD_SUMMARY_EVERY_N=3`.
 2. Write turns to Cosmos (via the SDK or `curl`) until the threshold is crossed.
-3. Watch the Functions host logs — you should see the orchestrator being started automatically.
+3. Watch the Functions host logs - you should see the orchestrator being started automatically.
 
 ```python
 import uuid

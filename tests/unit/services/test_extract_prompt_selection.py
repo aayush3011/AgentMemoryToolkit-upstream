@@ -1,4 +1,4 @@
-"""Tests for the env-selectable fact-extraction prompt (F-K).
+"""Tests for the env-selectable fact-extraction prompt.
 
 The v2 extractor is the shipped default; an env override can select v1, and an
 unknown value falls back to the v2 default (safe allowlist).

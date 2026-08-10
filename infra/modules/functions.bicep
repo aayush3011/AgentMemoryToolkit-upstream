@@ -59,7 +59,7 @@ param embeddingDimensions int = 1536
 @description('LLM model deployment name.')
 param chatDeploymentName string = 'gpt-4o-mini'
 
-@description('Azure OpenAI REST API version pinned for both chat and embedding clients. Always supplied by main.bicep — declared here without a default so the wiring stays explicit.')
+@description('Azure OpenAI REST API version pinned for both chat and embedding clients. Always supplied by main.bicep - declared here without a default so the wiring stays explicit.')
 param azureOpenAiApiVersion string
 
 // --- Function-app threshold / batching knobs ------------------------------
@@ -67,7 +67,7 @@ param azureOpenAiApiVersion string
 // All knobs are surfaced as Bicep params in main.bicep (bound to
 // `${THREAD_SUMMARY_EVERY_N=10}` etc. in main.parameters.json) so customers
 // can override them via `azd env set ...` before `azd up`. The defaults live
-// in main.bicep — these module params are declared without defaults so
+// in main.bicep - these module params are declared without defaults so
 // main.bicep stays the single source of truth.
 
 @description('Run thread-summary orchestration every N turns within a (user_id, thread_id). 0 = disabled.')

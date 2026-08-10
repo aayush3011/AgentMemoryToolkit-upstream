@@ -97,13 +97,24 @@ def segment_time_bounds(items: list[dict[str, Any]]) -> tuple[Optional[str], Opt
     Used to ground an episode's started_at/ended_at in its actual turn window
     when the model omits them - for the conversational benchmarks each turn's
     created_at carries the session date, so this yields correct temporal spans.
+
+    Ordering is by PARSED datetime, not lexical string order: mixed UTC offsets
+    (e.g. ``+05:00`` vs ``Z``) sort correctly instead of producing an inverted
+    ``(started, ended)`` pair that would later fail ``_validate_time_order``. The
+    original ISO strings are returned unchanged.
     """
-    times = sorted(
-        item["created_at"] for item in items if isinstance(item.get("created_at"), str) and item.get("created_at")
-    )
-    if not times:
+    parsed: list[tuple[datetime, str]] = []
+    for item in items:
+        raw = item.get("created_at")
+        if not isinstance(raw, str) or not raw:
+            continue
+        dt = parse_iso_datetime(raw)
+        if dt is not None:
+            parsed.append((dt, raw))
+    if not parsed:
         return None, None
-    return times[0], times[-1]
+    parsed.sort(key=lambda pair: pair[0])
+    return parsed[0][1], parsed[-1][1]
 
 
 def deterministic_episode_id(segment_key: str, index: int) -> str:

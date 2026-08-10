@@ -164,7 +164,6 @@ async def test_no_boundary_keeps_segment_open_without_calling_the_llm(monkeypatc
 
 @pytest.mark.asyncio
 async def test_idle_gap_below_min_turns_does_not_close_episode(monkeypatch) -> None:
-    # F4 (aio mirror): sub-min idle gap must not close a trivial episode.
     monkeypatch.setenv("EPISODE_IDLE_GAP_SECONDS", "120")
     monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
     monkeypatch.setenv("EPISODE_MAX_TURNS", "40")
@@ -181,7 +180,6 @@ async def test_idle_gap_below_min_turns_does_not_close_episode(monkeypatch) -> N
 
 @pytest.mark.asyncio
 async def test_idle_gap_below_min_turns_still_flushes_as_one_episode(monkeypatch) -> None:
-    # F4 (aio mirror): flush still drains the sub-min trailing segment.
     monkeypatch.setenv("EPISODE_IDLE_GAP_SECONDS", "120")
     monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
     monkeypatch.setenv("EPISODE_MAX_TURNS", "40")

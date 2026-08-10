@@ -19,7 +19,7 @@ This project uses [PEP 440](https://peps.python.org/pep-0440/) versioning:
 
 Before cutting a release:
 
-1. **CI green on `main`** — every workflow in `.github/workflows/` passes.
+1. **CI green on `main`** - every workflow in `.github/workflows/` passes.
 2. **Unit tests pass locally** in a fresh venv:
    ```bash
    python -m venv /tmp/release-venv
@@ -32,21 +32,21 @@ Before cutting a release:
    ```bash
    AGENT_MEMORY_RUN_INTEGRATION=true pytest tests/integration -q
    ```
-4. **Samples and notebooks work** — every script under `Samples/` runs to
+4. **Samples and notebooks work** - every script under `Samples/` runs to
    completion against the live environment.
-5. **No uncommitted local changes** — `git status` clean.
+5. **No uncommitted local changes** - `git status` clean.
 
 ## Cutting a release
 
 1. **Bump the version** in `pyproject.toml`:
-2. **Update `CHANGELOG.md`** — add a new section with the version, the
+2. **Update `CHANGELOG.md`** - add a new section with the version, the
    date, and a summary of changes. Move entries from the unreleased
    section if you keep one.
 3. **Bump the Function app's SDK pin** in `function_app/requirements.txt`
-   to match — `azure-cosmos-agent-memory==<NEW_VERSION>`. The FA installs
+   to match - `azure-cosmos-agent-memory==<NEW_VERSION>`. The FA installs
    the SDK from PyPI, so the pin must move in lockstep with the SDK
    release. (If the release workflow fails after merge, the FA will be
-   pinned to a non-existent version until you cut a follow-up patch —
+   pinned to a non-existent version until you cut a follow-up patch -
    coordinate the merge + release-workflow run together.)
 4. **Open a PR** with the version bump + CHANGELOG + updated FA pin.
    Suggested title: `Release v<NEW_VERSION>`. Get it reviewed and merged
@@ -55,7 +55,7 @@ Before cutting a release:
    - Navigate to **Actions → release → Run workflow**
    - Pick the `main` branch
    - Click **Run workflow**
-6. **The workflow does the rest** — see `.github/workflows/release.yml`:
+6. **The workflow does the rest** - see `.github/workflows/release.yml`:
    - Builds `dist/*.whl` + `dist/*.tar.gz`
    - Asserts no namespace `__init__.py` shadows are in the wheel
    - Publishes to **TestPyPI** via trusted publishing
@@ -69,7 +69,7 @@ Before cutting a release:
 ## Namespace package note
 
 `azure-cosmos-agent-memory` installs files under `azure/cosmos/agent_memory/`.
-It MUST NOT ship `azure/__init__.py` or `azure/cosmos/__init__.py` — those
+It MUST NOT ship `azure/__init__.py` or `azure/cosmos/__init__.py` - those
 are owned by the `azure-cosmos` package. The wheel build is configured
 (`[tool.setuptools.packages.find]` with `include = ["azure.cosmos.agent_memory*"]`
 and `namespaces = true`) so that only the `agent_memory` subtree is packaged.
@@ -94,4 +94,4 @@ If a release ships a regression:
 3. Add a deprecation note to the GitHub Release pointing at the
    replacement version.
 
-Never delete a PyPI release — yank it and ship a fixed version instead.
+Never delete a PyPI release - yank it and ship a fixed version instead.

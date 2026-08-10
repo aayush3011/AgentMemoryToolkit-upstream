@@ -727,3 +727,33 @@ def test_extraction_transcript_canonicalizes_speaker_role() -> None:
     prompt_text = json.dumps(chat.messages)
     assert "| agent]" in prompt_text
     assert "| assistant]" not in prompt_text
+
+
+def test_extract_memories_durable_clamps_out_of_range_fact_scores() -> None:
+    resp = {
+        "facts": [
+            {
+                "text": "The user loves hiking.",
+                "action": "ADD",
+                "category": "preference",
+                "confidence": 1.4,
+                "salience": -0.2,
+                "tags": [],
+            }
+        ],
+        "episodic": [],
+    }
+    memories_store = _Store([])
+    turns_store = _Store([_turn(1), _turn(2)])
+    service = PipelineService(
+        memories_store,
+        _SyncChat([resp]),
+        _SyncEmbeddings(),
+        containers=_containers_for_store(memories_store, turns_store=turns_store),
+    )
+
+    output = service.extract_memories_durable("u1", "t1")
+
+    assert len(output["facts"]) == 1
+    assert output["facts"][0]["confidence"] == 1.0
+    assert output["facts"][0]["salience"] == 0.0

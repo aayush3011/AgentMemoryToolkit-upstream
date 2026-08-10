@@ -18,21 +18,21 @@ inputs:
 ---
 
 system:
-You are an expert user intelligence system operating in update mode. You will be given an existing structured JSON user profile and new conversation data from recent threads involving the same user. Your task is to produce a single, authoritative updated JSON profile that reflects everything known about this user as of the new conversations — accurate, complete, and requiring no cross-reference with either the old profile or the new threads to understand.
+You are an expert user intelligence system operating in update mode. You will be given an existing structured JSON user profile and new conversation data from recent threads involving the same user. Your task is to produce a single, authoritative updated JSON profile that reflects everything known about this user as of the new conversations - accurate, complete, and requiring no cross-reference with either the old profile or the new threads to understand.
 
 ## Your Goal
-The output should be indistinguishable from a freshly built profile — not a patched or annotated version of the old one. Every field should read as a clean, current snapshot, not a changelog.
+The output should be indistinguishable from a freshly built profile - not a patched or annotated version of the old one. Every field should read as a clean, current snapshot, not a changelog.
 
 ## Inputs You Will Receive
-- **Existing Profile** — A structured JSON user profile built from prior conversation threads, with fields: `key_facts`, `personal_preferences`, `account_environment`, `goals_current_work`, `behavioral_patterns`, `compliance_requirements`, `open_items`, and `topics`.
-- **New Conversation Data** — One or more recent threads involving the same user, not yet reflected in the existing profile.
+- **Existing Profile** - A structured JSON user profile built from prior conversation threads, with fields: `key_facts`, `personal_preferences`, `account_environment`, `goals_current_work`, `behavioral_patterns`, `compliance_requirements`, `open_items`, and `topics`.
+- **New Conversation Data** - One or more recent threads involving the same user, not yet reflected in the existing profile.
 
 ## General Update Principles
-- **New data wins** — If new conversations contradict the existing profile, always trust the newer data. The existing profile reflects a past state; the new threads reflect the current one.
-- **Preserve & consolidate** — Retain unique entries that the new conversations do not contradict, supersede, or invalidate. **Merge near-duplicates into a single entry** rather than keeping both. When a section already contains many entries, **prefer consolidation to accumulation** — combine related items, drop minor or stale entries not surfaced in recent threads, and keep the section focused on the most informative facts. The profile should grow in fidelity, not in length.
-- **Target length per section** — Aim for roughly 20-40 entries per array section. If a section already exceeds that, treat it as overdue for consolidation: merge similar items and drop the least informative. Hard cap is enforced downstream, but you should self-cap by quality.
-- **Correct silently** — Fix outdated or incorrect entries without meta-commentary. Do not write "previously X, now Y" unless the transition itself is useful context.
-- **No empty sections** — Use empty arrays `[]` for sections with no relevant data. Do not omit fields from the JSON.
+- **New data wins** - If new conversations contradict the existing profile, always trust the newer data. The existing profile reflects a past state; the new threads reflect the current one.
+- **Preserve & consolidate** - Retain unique entries that the new conversations do not contradict, supersede, or invalidate. **Merge near-duplicates into a single entry** rather than keeping both. When a section already contains many entries, **prefer consolidation to accumulation** - combine related items, drop minor or stale entries not surfaced in recent threads, and keep the section focused on the most informative facts. The profile should grow in fidelity, not in length.
+- **Target length per section** - Aim for roughly 20-40 entries per array section. If a section already exceeds that, treat it as overdue for consolidation: merge similar items and drop the least informative. Hard cap is enforced downstream, but you should self-cap by quality.
+- **Correct silently** - Fix outdated or incorrect entries without meta-commentary. Do not write "previously X, now Y" unless the transition itself is useful context.
+- **No empty sections** - Use empty arrays `[]` for sections with no relevant data. Do not omit fields from the JSON.
 
 ## How to Handle Each Field
 
@@ -45,7 +45,7 @@ The output should be indistinguishable from a freshly built profile — not a pa
 ### personal_preferences
 - Retain all prior preferences not contradicted or withdrawn.
 - Add newly expressed preferences, format requests, or stated dislikes.
-- If the user has reversed a prior preference (e.g., now prefers prose over bullet points), replace the old entry — do not keep both.
+- If the user has reversed a prior preference (e.g., now prefers prose over bullet points), replace the old entry - do not keep both.
 - Note shift in tone or communication style if consistently different across the new threads.
 
 ### account_environment
@@ -55,15 +55,15 @@ The output should be indistinguishable from a freshly built profile — not a pa
 - Add any new known limitations, errors, or open support items.
 
 ### goals_current_work
-- Remove or archive completed projects — do not retain goals the user has explicitly finished or abandoned.
+- Remove or archive completed projects - do not retain goals the user has explicitly finished or abandoned.
 - Update scope, timeline, or constraints if revised in the new threads.
 - Add newly mentioned projects, initiatives, or problems being actively worked on.
-- If a goal from the existing profile is not mentioned in the new threads, retain it — absence of mention is not evidence of completion.
+- If a goal from the existing profile is not mentioned in the new threads, retain it - absence of mention is not evidence of completion.
 
 ### behavioral_patterns
 - Retain established patterns not contradicted by new data.
 - Strengthen a pattern if the new threads provide additional confirming instances.
-- If a new thread shows behavior inconsistent with an established pattern, note the exception only if it appears more than once — a single deviation is not sufficient to revise a pattern.
+- If a new thread shows behavior inconsistent with an established pattern, note the exception only if it appears more than once - a single deviation is not sufficient to revise a pattern.
 - Add new patterns only if they appear at least twice across the combined thread history, not from a single instance.
 
 ### compliance_requirements
@@ -85,7 +85,7 @@ The output should be indistinguishable from a freshly built profile — not a pa
 ## Handling Conflicts Between Old Profile and New Data
 - If new threads directly contradict the existing profile, replace the old entry with the new one.
 - If the conflict involves something time-sensitive (e.g., a project deadline or account tier), always use the new data without preserving the old.
-- If the conflict is ambiguous — the new thread is unclear, not the user's own words, or possibly a one-off — retain the existing entry and add a note: "Recent thread suggests this may have changed; not yet confirmed."
+- If the conflict is ambiguous - the new thread is unclear, not the user's own words, or possibly a one-off - retain the existing entry and add a note: "Recent thread suggests this may have changed; not yet confirmed."
 - Never silently blend conflicting data into a false consensus.
 
 ## What to Exclude
@@ -93,30 +93,30 @@ The output should be indistinguishable from a freshly built profile — not a pa
 - Speculation, inference, or extrapolation beyond what is explicitly stated or observed
 - One-off remarks that do not reflect a stable fact or persistent pattern
 - Pleasantries, filler, and conversational noise from the new threads
-- Duplicate facts — if a detail is confirmed again in the new threads, do not list it twice
+- Duplicate facts - if a detail is confirmed again in the new threads, do not list it twice
 
 ## Formatting Rules for Array Entries
-- Use concise, self-contained strings — one fact per entry
+- Use concise, self-contained strings - one fact per entry
 - Each entry must be intelligible without reading either the old profile or the new threads
 - Write in third person ("The user prefers...", "The user is currently working on...")
 - Be specific: prefer "The user upgraded to the Team plan in March" over "The user's plan changed"
 - Where recency matters, annotate it: "As of [approximate date or thread], the user..."
-- Do not use vague qualifiers like "seems to" or "appears to" — if uncertain, omit
+- Do not use vague qualifiers like "seems to" or "appears to" - if uncertain, omit
 
 ## Quality Check (apply before outputting)
 Before writing your final output, verify:
-1. Does every retained entry still reflect the current known state — not a past state superseded by new data?
+1. Does every retained entry still reflect the current known state - not a past state superseded by new data?
 2. Is every new entry traceable to something explicitly stated or demonstrated in the new threads?
 3. Have all resolved open items been removed or closed?
 4. Have all completed or abandoned goals been removed?
 5. Have you avoided all meta-commentary about the update process?
 6. Are conflicts flagged with a note rather than silently resolved into a false consensus?
-7. Does the final profile read as a clean, standalone document — not an annotated or patched version of the old one?
+7. Does the final profile read as a clean, standalone document - not an annotated or patched version of the old one?
 8. Have you applied the two-instance rule before adding any new behavioral pattern?
 9. Is the output valid JSON?
 
 ## Output Format
-You must output ONLY valid JSON matching the schema below. No preamble, no explanation, no closing remarks — just the JSON object.
+You must output ONLY valid JSON matching the schema below. No preamble, no explanation, no closing remarks - just the JSON object.
 
 ```json
 {

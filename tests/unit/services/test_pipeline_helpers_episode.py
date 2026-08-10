@@ -1,7 +1,7 @@
 """Unit tests for the shared, IO-free episode segmentation helpers.
 
 These pure functions live in ``services/_pipeline_helpers.py`` so the sync and
-aio pipelines share one implementation (F5). A single test file covers both.
+aio pipelines share one implementation. A single test file covers both.
 """
 
 from __future__ import annotations
@@ -62,6 +62,16 @@ class TestTimeHelpers:
 
     def test_segment_time_bounds_empty(self) -> None:
         assert segment_time_bounds([]) == (None, None)
+
+    def test_segment_time_bounds_mixed_offsets_sort_chronologically(self) -> None:
+        items = [
+            {"created_at": "2025-01-01T05:00:00Z"},
+            {"created_at": "2025-01-01T09:00:00+05:00"},
+        ]
+        assert segment_time_bounds(items) == (
+            "2025-01-01T09:00:00+05:00",
+            "2025-01-01T05:00:00Z",
+        )
 
 
 class TestFindEpisodeBoundary:

@@ -167,23 +167,21 @@ def test_no_boundary_keeps_segment_open_without_calling_the_llm(monkeypatch) -> 
     assert chat.calls == 0  # extraction LLM only runs at a boundary
 
 
-def test_deterministic_episode_id_is_stable_and_content_scoped() -> None:
+def test_deterministic_episode_id_is_stable_and_ordinal_scoped() -> None:
     service, *_ = _service([])
     key = "u1\x00t1\x00turn-1\x00turn-2"
-    id_a = service._deterministic_episode_id(key, "hash-aaa")
-    id_a_again = service._deterministic_episode_id(key, "hash-aaa")
-    id_b = service._deterministic_episode_id(key, "hash-bbb")
-    id_other_segment = service._deterministic_episode_id("u1\x00t1\x00turn-3\x00turn-4", "hash-aaa")
+    id_0 = service._deterministic_episode_id(key, 0)
+    id_0_again = service._deterministic_episode_id(key, 0)
+    id_1 = service._deterministic_episode_id(key, 1)
+    id_other_segment = service._deterministic_episode_id("u1\x00t1\x00turn-3\x00turn-4", 0)
 
-    assert id_a.startswith("ep_")
-    assert id_a == id_a_again  # same segment + content -> same id (idempotent)
-    assert id_a != id_b  # different content -> different id
-    assert id_a != id_other_segment  # different segment -> different id
+    assert id_0.startswith("ep_")
+    assert id_0 == id_0_again  # same segment + same ordinal -> same id (idempotent)
+    assert id_0 != id_1  # different ordinal -> different id
+    assert id_0 != id_other_segment  # different segment -> different id
 
 
 def test_idle_gap_below_min_turns_does_not_close_episode(monkeypatch) -> None:
-    # F4: an idle gap that falls below EPISODE_MIN_TURNS must not close a trivial
-    # sub-min (here one-turn) episode; the segment stays open (no flush).
     monkeypatch.setenv("EPISODE_IDLE_GAP_SECONDS", "120")
     monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
     monkeypatch.setenv("EPISODE_MAX_TURNS", "40")
@@ -200,8 +198,6 @@ def test_idle_gap_below_min_turns_does_not_close_episode(monkeypatch) -> None:
 
 
 def test_idle_gap_below_min_turns_still_flushes_as_one_episode(monkeypatch) -> None:
-    # F4: the min-turns floor gates natural boundaries only; an explicit flush
-    # still drains the sub-min trailing segment into a single episode.
     monkeypatch.setenv("EPISODE_IDLE_GAP_SECONDS", "120")
     monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
     monkeypatch.setenv("EPISODE_MAX_TURNS", "40")
@@ -216,8 +212,6 @@ def test_idle_gap_below_min_turns_still_flushes_as_one_episode(monkeypatch) -> N
 
 
 def test_closed_segment_with_no_episode_still_stamps_turns(monkeypatch) -> None:
-    # F-K: a segment that legitimately yields no episode must still stamp its
-    # turns, so re-evaluation does not reprocess the same window forever.
     monkeypatch.setenv("EPISODE_IDLE_GAP_SECONDS", "120")
     monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
     monkeypatch.setenv("EPISODE_MAX_TURNS", "40")
@@ -231,3 +225,41 @@ def test_closed_segment_with_no_episode_still_stamps_turns(monkeypatch) -> None:
     assert _episodes(memories) == []
     # The closed pre-gap turns are still watermarked despite yielding no episode.
     assert _stamped(turns_store) == ["turn-1", "turn-2"]
+
+
+def test_extract_episodes_defers_segment_on_retryable_error(monkeypatch) -> None:
+    monkeypatch.setenv("EPISODE_IDLE_GAP_SECONDS", "120")
+    monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
+    monkeypatch.setenv("EPISODE_MAX_TURNS", "40")
+    turns = [_turn_at(1, 1), _turn_at(2, 2), _turn_at(3, 30)]  # gap closes [1,2]
+    service, memories, turns_store, _ = _service(turns)
+
+    def _boom(*a, **k):
+        raise RuntimeError("transient rate limit 429")
+
+    service._run_prompty = _boom  # type: ignore[assignment]
+
+    result = service.extract_episodes("u1", "t1")
+
+    assert result == {"episodes": 0}
+    assert _episodes(memories) == []
+    assert _stamped(turns_store) == []  # un-stamped -> retried next run
+
+
+def test_extract_episodes_quarantines_segment_on_non_retryable_error(monkeypatch) -> None:
+    monkeypatch.setenv("EPISODE_IDLE_GAP_SECONDS", "120")
+    monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
+    monkeypatch.setenv("EPISODE_MAX_TURNS", "40")
+    turns = [_turn_at(1, 1), _turn_at(2, 2), _turn_at(3, 30)]
+    service, memories, turns_store, _ = _service(turns)
+
+    def _boom(*a, **k):
+        raise RuntimeError("content_filter triggered")
+
+    service._run_prompty = _boom  # type: ignore[assignment]
+
+    result = service.extract_episodes("u1", "t1")
+
+    assert result == {"episodes": 0}
+    assert _episodes(memories) == []
+    assert _stamped(turns_store) == ["turn-1", "turn-2"]  # quarantined + advanced

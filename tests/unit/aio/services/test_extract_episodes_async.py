@@ -170,7 +170,6 @@ class _AsyncIdUniqueStore(_AsyncTrackingStore):
 
 @pytest.mark.asyncio
 async def test_build_episode_docs_id_stable_across_summary_text() -> None:
-    # F1: identity is segment_key + ordinal, never the LLM prose.
     service, _, _ = _service(
         [
             {"episodes": [_episode(summary="One phrasing of the CI-retry episode.")]},
@@ -187,7 +186,6 @@ async def test_build_episode_docs_id_stable_across_summary_text() -> None:
 
 @pytest.mark.asyncio
 async def test_extract_episodes_skips_duplicate_when_segment_reprocessed(monkeypatch) -> None:
-    # F1: crash-before-stamp re-run collides on deterministic id -> 409 skip.
     monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
     store = _AsyncIdUniqueStore([])
     turns = _AsyncStore([_turn(1), _turn(2)])
@@ -213,7 +211,6 @@ async def test_extract_episodes_skips_duplicate_when_segment_reprocessed(monkeyp
 
 @pytest.mark.asyncio
 async def test_build_episode_docs_falls_back_to_segment_times_on_unparseable_llm_times() -> None:
-    # F2: non-ISO model times fall back to grounded segment bounds, not dropped.
     bad = _episode()
     bad["started_at"] = "March 9th"
     bad["ended_at"] = "2025-01-01T00:02:00+00:00"
@@ -228,7 +225,6 @@ async def test_build_episode_docs_falls_back_to_segment_times_on_unparseable_llm
 
 @pytest.mark.asyncio
 async def test_build_episode_docs_keeps_mixed_tz_llm_times_after_normalization() -> None:
-    # F2: naive-date + tz-aware pair is valid after normalization; episode kept.
     mixed = _episode()
     mixed["started_at"] = "2026-03-09"
     mixed["ended_at"] = "2026-03-10T09:08:00+00:00"
@@ -243,8 +239,6 @@ async def test_build_episode_docs_keeps_mixed_tz_llm_times_after_normalization()
 
 @pytest.mark.asyncio
 async def test_build_episode_docs_keeps_padded_timestamps_and_clamps_scores() -> None:
-    # F-A (aio mirror): padded timestamps are stripped-and-kept; out-of-range
-    # salience/confidence are clamped rather than dropping the episode.
     ep = _episode()
     ep["started_at"] = " 2025-01-01T00:01:00+00:00"
     ep["ended_at"] = "2025-01-01T00:02:00+00:00 "
