@@ -1049,7 +1049,7 @@ class TestSearchCosmos:
             memory_id=None,
             user_id=None,
             role=None,
-            memory_types=None,
+            memory_types=["fact"],
             thread_id=None,
             top_k=5,
             tags_all=None,

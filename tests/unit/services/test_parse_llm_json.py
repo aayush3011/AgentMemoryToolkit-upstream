@@ -38,10 +38,26 @@ class TestDoubledAndTrailing:
     def test_fenced_object_with_trailing_duplicate(self) -> None:
         assert parse_llm_json('```json\n{"a": 1}\n``` {"a": 1}') == {"a": 1}
 
-    def test_trailing_data_emits_warning(self, caplog: pytest.LogCaptureFixture) -> None:
-        with caplog.at_level(logging.WARNING, logger=_HELPER_LOGGER):
+    def test_doubled_object_emits_merge_info(self, caplog: pytest.LogCaptureFixture) -> None:
+        # Two clean concatenated objects are merged (so no items are dropped);
+        # this is a recoverable case logged at INFO, not a warning.
+        with caplog.at_level(logging.INFO, logger=_HELPER_LOGGER):
             parse_llm_json(_DOUBLED)
-        assert any("extra data after the first JSON object" in r.message for r in caplog.records)
+        assert any("concatenated JSON objects" in r.message for r in caplog.records)
+
+    def test_doubled_object_with_nonempty_lists_concatenates(self) -> None:
+        # Discriminating merge test: list fields from BOTH objects are combined,
+        # so a broken (no-op) merge that kept only the first object would fail here.
+        doubled = '{"facts":[{"t":"a"}],"episodic":[]} {"facts":[{"t":"b"}],"episodic":[{"e":"x"}]}'
+        merged = parse_llm_json(doubled)
+        assert merged["facts"] == [{"t": "a"}, {"t": "b"}]
+        assert merged["episodic"] == [{"e": "x"}]
+
+    def test_trailing_garbage_emits_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        # A valid object followed by non-JSON garbage is salvaged but warned.
+        with caplog.at_level(logging.WARNING, logger=_HELPER_LOGGER):
+            parse_llm_json('{"facts": [{"text": "x"}]} <end of turn>')
+        assert any("non-JSON trailing data" in r.message for r in caplog.records)
 
     def test_clean_object_emits_no_warning(self, caplog: pytest.LogCaptureFixture) -> None:
         with caplog.at_level(logging.WARNING, logger=_HELPER_LOGGER):
@@ -78,3 +94,30 @@ class TestGenuineErrors:
             parse_llm_json("I could not find any memories.")
         assert "invalid JSON" in str(exc.value)
         assert "TRUNCATED" not in str(exc.value)
+
+
+class TestNonObjectRoot:
+    """A non-object JSON root must raise LLMError, not leak a non-dict.
+
+    Callers immediately do ``parsed.get("facts"/"episodes")``; a bare list/scalar
+    would raise AttributeError downstream, which the extraction error-handlers
+    then misclassify as a transient (retryable) failure and defer forever.
+    """
+
+    def test_bare_array_root_raises(self) -> None:
+        with pytest.raises(LLMError) as exc:
+            parse_llm_json('[{"text": "x"}]')
+        assert "non-object JSON root" in str(exc.value)
+
+    def test_bare_array_root_with_trailing_data_raises(self) -> None:
+        with pytest.raises(LLMError) as exc:
+            parse_llm_json('[1, 2] {"a": 1}')
+        assert "non-object JSON root" in str(exc.value)
+
+    def test_scalar_number_root_raises(self) -> None:
+        with pytest.raises(LLMError):
+            parse_llm_json("42")
+
+    def test_scalar_string_root_raises(self) -> None:
+        with pytest.raises(LLMError):
+            parse_llm_json('"just a sentence"')

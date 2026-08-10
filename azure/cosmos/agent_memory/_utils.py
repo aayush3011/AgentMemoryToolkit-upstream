@@ -7,6 +7,7 @@ duplication and hidden cross-module coupling.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import re
 import uuid
@@ -341,6 +342,48 @@ def _resolve_vector_index_type(val: Optional[str]) -> str:
 
 
 _SIMILARITY_DESCENDING_FUNCTIONS = frozenset({"cosine", "dotproduct"})
+
+
+def cosine_similarity(a: list[float], b: list[float]) -> float:
+    """Cosine similarity of two equal-length vectors.
+
+    Returns 0.0 for empty, mismatched-length, or zero-magnitude inputs (treated
+    as "unrelated"). Pure Python so the SDK stays numpy-free.
+    """
+    if not a or not b or len(a) != len(b):
+        return 0.0
+    dot = 0.0
+    norm_a = 0.0
+    norm_b = 0.0
+    for x, y in zip(a, b):
+        dot += x * y
+        norm_a += x * x
+        norm_b += y * y
+    if norm_a <= 0.0 or norm_b <= 0.0:
+        return 0.0
+    return dot / math.sqrt(norm_a * norm_b)
+
+
+def vector_centroid(vectors: list[list[float]]) -> list[float]:
+    """Component-wise mean of equal-length vectors; ``[]`` when none are usable."""
+    dim = 0
+    for vec in vectors:
+        if vec:
+            dim = len(vec)
+            break
+    if dim == 0:
+        return []
+    acc = [0.0] * dim
+    count = 0
+    for vec in vectors:
+        if not vec or len(vec) != dim:
+            continue
+        for i in range(dim):
+            acc[i] += vec[i]
+        count += 1
+    if count == 0:
+        return []
+    return [value / count for value in acc]
 
 
 def vector_order_direction(distance_function: str) -> str:

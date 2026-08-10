@@ -1,6 +1,6 @@
 # Operations
 
-Runtime knobs for an Agent-Memory-Toolkit deployment. Most ops levers live in `.env` / Function-app App Settings — change them, restart the consumer, and you're done. Deployment-time knobs (Bicep params bound to `azd env set ...`) live in [`infra/README.md`](../infra/README.md).
+Runtime knobs for an Agent-Memory-Toolkit deployment. Most ops levers live in `.env` / Function-app App Settings - change them, restart the consumer, and you're done. Deployment-time knobs (Bicep params bound to `azd env set ...`) live in [`infra/README.md`](../infra/README.md).
 
 ## Memory lifecycle (TTL)
 

@@ -49,7 +49,7 @@ def ts_Extract(payload: dict) -> dict:
     """Generate (or incrementally update) the thread summary body only."""
     user_id = payload["user_id"]
     thread_id = payload["thread_id"]
-    summary = get_pipeline().generate_thread_summary_dry(
+    summary = get_pipeline().generate_thread_summary_durable(
         user_id=user_id,
         thread_id=thread_id,
         recent_k=payload.get("limit"),

@@ -671,23 +671,40 @@ class CosmosMemoryClient(_BaseMemoryClient):
         min_confidence: Optional[float] = None,
         created_after: Optional[str | datetime] = None,
         created_before: Optional[str | datetime] = None,
+        include_episodes: bool = False,
         include_turns: bool = False,
         turn_top_k: Optional[int] = None,
         include_summaries: bool = False,
         summary_top_k: Optional[int] = None,
     ) -> list[dict[str, Any]]:
-        """Search memories using vector similarity, with optional summary / raw-turn blending.
+        """Search memories using vector similarity, with optional retrieval blending.
 
-        ``include_summaries`` / ``include_turns`` prepend matching summaries /
-        append matching raw turns (best-effort); see Docs/concepts.md.
+        The base search returns facts and, when ``include_episodes`` is True,
+        episodes too - both in a single ranked query sharing one ``top_k`` budget,
+        so facts and episodes compete on relevance rather than each getting a
+        fixed slice. When ``include_episodes`` is False the base is facts only.
+        Callers may pass ``memory_types`` to search other non-episodic types;
+        ``episodic`` is added or removed based on ``include_episodes``. Optional
+        ``include_summaries`` / ``include_turns`` blend those in after the base
+        block, deduped by content (best-effort; a blend fetch failure never
+        breaks the base result).
         """
         store = self._get_store()
-        results = store.search(
+        # Facts + episodes share one ranked query and one top_k budget: episodic
+        # is added when include_episodes is True and stripped when it is False.
+        if memory_types is not None:
+            base_memory_types = [t for t in memory_types if t != "episodic"]
+        else:
+            base_memory_types = ["fact"]
+        if include_episodes:
+            base_memory_types = [*base_memory_types, "episodic"]
+        base_memory_types = base_memory_types or ["fact"]
+        base = store.search(
             search_terms=search_terms,
             memory_id=memory_id,
             user_id=user_id,
             role=role,
-            memory_types=memory_types,
+            memory_types=base_memory_types,
             thread_id=thread_id,
             top_k=top_k,
             tags_all=tags_all,
@@ -701,9 +718,20 @@ class CosmosMemoryClient(_BaseMemoryClient):
         )
 
         if not user_id:
-            return results
+            return base
 
-        seen_content = {str(r.get("content") or "").strip() for r in results}
+        results: list[dict[str, Any]] = []
+        seen_content: set[str] = set()
+
+        def _extend(docs: list[dict[str, Any]]) -> None:
+            for doc in docs:
+                content = str(doc.get("content") or "").strip()
+                if content and content not in seen_content:
+                    seen_content.add(content)
+                    results.append(doc)
+
+        _extend(base)
+
         if include_summaries:
             try:
                 summaries = store.search_summaries(
@@ -716,14 +744,9 @@ class CosmosMemoryClient(_BaseMemoryClient):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("search_cosmos: include_summaries search failed (%s); skipping summaries", exc)
                 summaries = []
-            # Order is facts -> summaries -> raw turns: append summaries after the
-            # relevance-ranked memory hits (and before turns) so they neither jump
-            # the ranking nor evict facts under context-window truncation.
-            for s in summaries:
-                content = str(s.get("content") or "").strip()
-                if content and content not in seen_content:
-                    seen_content.add(content)
-                    results.append(s)
+            # Summaries come after facts/episodes (and before turns) so they
+            # neither jump the ranking nor evict memories under truncation.
+            _extend(summaries)
 
         if include_turns:
             try:
@@ -740,11 +763,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("search_cosmos: include_turns turn search failed (%s); returning memories only", exc)
                 turns = []
-            for turn in turns:
-                content = str(turn.get("content") or "").strip()
-                if content and content not in seen_content:
-                    seen_content.add(content)
-                    results.append(turn)
+            _extend(turns)
         return results
 
     def search_summaries(
@@ -866,6 +885,19 @@ class CosmosMemoryClient(_BaseMemoryClient):
             recent_k=recent_k,
         )
 
+    def get_episodes(
+        self,
+        user_id: str,
+        thread_id: Optional[str] = None,
+        recent_k: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve active episodic memories for ``user_id``, newest first."""
+        return self._get_store().get_episodes(
+            user_id=user_id,
+            thread_id=thread_id,
+            recent_k=recent_k,
+        )
+
     def get_user_summary(self, user_id: str) -> Optional[dict[str, Any]]:
         """Retrieve the user's summary document from Cosmos DB, or ``None`` if absent."""
         return self._get_store().get_user_summary(user_id=user_id)
@@ -969,6 +1001,36 @@ class CosmosMemoryClient(_BaseMemoryClient):
     ) -> dict[str, int]:
         """Extract facts and episodic memories from a thread."""
         return self._get_pipeline().extract_memories(user_id, thread_id, recent_k)
+
+    def extract_episodes(
+        self,
+        user_id: str,
+        thread_id: str,
+        *,
+        flush: bool = False,
+    ) -> dict[str, int]:
+        """Segment the thread's open turn stream into episodes at detected boundaries.
+
+        Episodes are created at idle time-gaps (detected only once a later turn
+        reveals the gap), topic shifts, and a max-size cap. A focused session
+        shorter than the max-size cap therefore episodizes only lazily - on the
+        next turn after the idle gap - and a one-shot session that never resumes
+        is not episodized at all under the auto path. Pass ``flush=True`` at the
+        end of a conversation (or benchmark run) to drain the trailing open
+        segment immediately; integrators that know when a session ends should
+        call this on session close.
+
+        Only supported when the in-process backend owns processing; when a
+        Durable Function app is the active processor this raises
+        ``NotImplementedError`` so writes are not split away from that backend.
+        """
+        processor = self._get_processor()
+        if not isinstance(processor, InProcessProcessor):
+            raise NotImplementedError(
+                "Episode extraction runs in-process; manual invocation via the SDK is not "
+                "supported when the Durable Function app is the active processor."
+            )
+        return self._get_pipeline().extract_episodes(user_id, thread_id, flush=flush)
 
     def synthesize_procedural(self, user_id: str, *, force: bool = False) -> dict[str, Any]:
         processor = self._get_processor()

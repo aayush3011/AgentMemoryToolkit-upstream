@@ -77,7 +77,9 @@ class _Store:
             docs = [doc for doc in docs if doc.get("type") in types]
         if "superseded_by" in sql:
             docs = [doc for doc in docs if not doc.get("superseded_by")]
-        if "extracted_at" in sql:
+        if "episode_extracted_at" in sql:
+            docs = [doc for doc in docs if not doc.get("episode_extracted_at")]
+        elif "extracted_at" in sql:
             docs = [doc for doc in docs if not doc.get("extracted_at")]
         return docs
 
@@ -195,19 +197,11 @@ def _response() -> dict[str, Any]:
                 "tags": ["ui"],
             }
         ],
-        "episodic": [
-            {
-                "scope_type": "project",
-                "scope_value": "CI",
-                "text": "CI retries resolved flaky tests.",
-                "lesson": "Use retries for flaky CI tests.",
-                "confidence": 0.8,
-            }
-        ],
+        "episodic": [],
     }
 
 
-def test_extract_memories_dry_shape_is_small_and_has_no_embeddings() -> None:
+def test_extract_memories_durable_shape_is_small_and_has_no_embeddings() -> None:
     chat = _SyncChat([_response()])
     embeddings = _SyncEmbeddings()
     memories_store = _Store([])
@@ -219,16 +213,120 @@ def test_extract_memories_dry_shape_is_small_and_has_no_embeddings() -> None:
         containers=_containers_for_store(memories_store, turns_store=turns_store),
     )
 
-    output = service.extract_memories_dry("u1", "t1")
+    output = service.extract_memories_durable("u1", "t1")
 
     assert set(output) == {"facts", "episodic", "updates", "processed_turn_docs"}
     assert len(json.dumps(output)) < 32 * 1024
-    assert output["facts"] and output["episodic"]
+    assert output["facts"]
+    assert output["episodic"] == []
     assert all("embedding" not in doc for docs in (output["facts"], output["episodic"]) for doc in docs)
     assert embeddings.calls == []
 
 
-def test_extract_memories_dry_is_byte_deterministic_for_same_llm_response() -> None:
+def test_build_episode_docs_builds_new_episode_shape_without_embeddings() -> None:
+    chat = _SyncChat(
+        [
+            {
+                "episodes": [
+                    {
+                        "title": "Fixed CI retries",
+                        "summary": "The user fixed flaky CI retries and the tests passed.",
+                        "started_at": "2025-01-01T00:01:00+00:00",
+                        "ended_at": "2025-01-01T00:02:00+00:00",
+                        "participants": [],
+                        "events": [
+                            {
+                                "sequence": 1,
+                                "description": "CI retries were added.",
+                                "occurred_at": "2025-01-01T00:01:00+00:00",
+                                "source_turn_ids": ["turn-1", "missing"],
+                            },
+                            {
+                                "sequence": 2,
+                                "description": "The tests passed.",
+                                "occurred_at": "2025-01-01T00:02:00+00:00",
+                                "source_turn_ids": ["turn-2"],
+                            },
+                        ],
+                        "outcome": {"status": "successful", "description": "The tests passed."},
+                        "lessons": ["Use retries for flaky CI."],
+                        "salience": 0.8,
+                        "confidence": 0.9,
+                    }
+                ]
+            }
+        ]
+    )
+    embeddings = _SyncEmbeddings()
+    memories_store = _Store([])
+    turns_store = _Store([_turn(1), _turn(2)])
+    service = PipelineService(
+        memories_store,
+        chat,
+        embeddings,
+        containers=_containers_for_store(memories_store, turns_store=turns_store),
+    )
+
+    [doc] = service._build_episode_docs("u1", "t1", [_turn(1), _turn(2)], segment_key="seg-1")
+
+    assert doc["id"].startswith("ep_")
+    assert doc["type"] == "episodic"
+    assert doc["content"] == "The user fixed flaky CI retries and the tests passed."
+    assert len(doc["content_hash"]) == 32
+    assert doc["title"] == "Fixed CI retries"
+    assert doc["source_turn_ids"] == ["turn-1", "turn-2"]
+    assert doc["events"][0]["source_turn_ids"] == ["turn-1"]
+    assert doc["outcome"]["status"] == "successful"
+    assert doc["prompt_id"] == "extract_episode.prompty"
+    assert "embedding" not in doc
+    assert embeddings.calls == []
+
+
+def test_build_episode_docs_allows_null_outcome_and_maps_stable_turn_labels() -> None:
+    chat = _SyncChat(
+        [
+            {
+                "episodes": [
+                    {
+                        "title": "Family dinner",
+                        "summary": "The user had a family dinner with Elena.",
+                        "started_at": None,
+                        "ended_at": None,
+                        "participants": ["Elena"],
+                        "events": [
+                            {
+                                "sequence": 1,
+                                "description": "The user had dinner with Elena.",
+                                "occurred_at": None,
+                                "source_turn_ids": ["turn-1"],
+                            }
+                        ],
+                        "outcome": None,
+                        "lessons": [],
+                        "salience": 0.6,
+                        "confidence": 0.95,
+                    }
+                ]
+            }
+        ]
+    )
+    memories_store = _Store([])
+    turns_store = _Store([{**_turn(1), "id": "actual-turn-id"}])
+    service = PipelineService(
+        memories_store,
+        chat,
+        _SyncEmbeddings(),
+        containers=_containers_for_store(memories_store, turns_store=turns_store),
+    )
+
+    [doc] = service._build_episode_docs("u1", "t1", [{**_turn(1), "id": "actual-turn-id"}], segment_key="seg-2")
+
+    assert doc["outcome"] is None
+    assert doc["source_turn_ids"] == ["actual-turn-id"]
+    assert doc["events"][0]["source_turn_ids"] == ["actual-turn-id"]
+
+
+def test_extract_memories_durable_is_byte_deterministic_for_same_llm_response() -> None:
     store = _Store([])
     turns_store = _Store([_turn(1)])
     service = PipelineService(
@@ -238,15 +336,15 @@ def test_extract_memories_dry_is_byte_deterministic_for_same_llm_response() -> N
         containers=_containers_for_store(store, turns_store=turns_store),
     )
 
-    first = service.extract_memories_dry("u1", "t1")
-    second = service.extract_memories_dry("u1", "t1")
+    first = service.extract_memories_durable("u1", "t1")
+    second = service.extract_memories_durable("u1", "t1")
 
     assert json.dumps(first, sort_keys=True, separators=(",", ":")) == json.dumps(
         second, sort_keys=True, separators=(",", ":")
     )
 
 
-def test_extract_memories_dry_does_not_call_store_search() -> None:
+def test_extract_memories_durable_does_not_call_store_search() -> None:
     """Extraction is single-pass and existing-memory-free: it must not issue a
     dedup-context vector search (dedup is handled by hash + reconciliation)."""
     memories_store = _Store([])
@@ -258,13 +356,13 @@ def test_extract_memories_dry_does_not_call_store_search() -> None:
         containers=_containers_for_store(memories_store, turns_store=_Store([_turn(1)])),
     )
 
-    service.extract_memories_dry("u1", "t1")
+    service.extract_memories_durable("u1", "t1")
 
     assert memories_store.search_calls == []
 
 
 @pytest.mark.asyncio
-async def test_async_extract_memories_dry_shape_is_small_and_has_no_embeddings() -> None:
+async def test_async_extract_memories_durable_shape_is_small_and_has_no_embeddings() -> None:
     chat = _AsyncChat([_response()])
     embeddings = _AsyncEmbeddings()
     memories_store = _AsyncStore([])
@@ -276,7 +374,7 @@ async def test_async_extract_memories_dry_shape_is_small_and_has_no_embeddings()
         containers=_async_containers_for_store(memories_store, turns_store=turns_store),
     )
 
-    output = await service.extract_memories_dry("u1", "t1")
+    output = await service.extract_memories_durable("u1", "t1")
 
     assert set(output) == {"facts", "episodic", "updates", "processed_turn_docs"}
     assert len(json.dumps(output)) < 32 * 1024
@@ -285,7 +383,7 @@ async def test_async_extract_memories_dry_shape_is_small_and_has_no_embeddings()
 
 
 @pytest.mark.asyncio
-async def test_async_extract_memories_dry_is_byte_deterministic_for_same_llm_response() -> None:
+async def test_async_extract_memories_durable_is_byte_deterministic_for_same_llm_response() -> None:
     store = _AsyncStore([])
     turns_store = _AsyncStore([_turn(1)])
     service = AsyncPipelineService(
@@ -295,8 +393,8 @@ async def test_async_extract_memories_dry_is_byte_deterministic_for_same_llm_res
         containers=_async_containers_for_store(store, turns_store=turns_store),
     )
 
-    first = await service.extract_memories_dry("u1", "t1")
-    second = await service.extract_memories_dry("u1", "t1")
+    first = await service.extract_memories_durable("u1", "t1")
+    second = await service.extract_memories_durable("u1", "t1")
 
     assert json.dumps(first, sort_keys=True, separators=(",", ":")) == json.dumps(
         second, sort_keys=True, separators=(",", ":")
@@ -304,7 +402,7 @@ async def test_async_extract_memories_dry_is_byte_deterministic_for_same_llm_res
 
 
 @pytest.mark.asyncio
-async def test_async_extract_memories_dry_does_not_call_store_search() -> None:
+async def test_async_extract_memories_durable_does_not_call_store_search() -> None:
     store = _AsyncStore([])
 
     store.search = AsyncMock(return_value=[])
@@ -315,7 +413,7 @@ async def test_async_extract_memories_dry_does_not_call_store_search() -> None:
         containers=_async_containers_for_store(store, turns_store=_AsyncStore([_turn(1)])),
     )
 
-    await service.extract_memories_dry("u1", "t1")
+    await service.extract_memories_durable("u1", "t1")
 
     store.search.assert_not_awaited()
 
@@ -350,6 +448,11 @@ class _BatchChat:
         )
 
 
+class _AsyncBatchChat(_BatchChat):
+    async def generate(self, messages, **opts):
+        return super().generate(messages, **opts)
+
+
 def _one_turn_per_batch(monkeypatch):
     # Force each small turn into its own extraction batch.
     monkeypatch.setattr("azure.cosmos.agent_memory.thresholds.get_extraction_batch_max_tokens", lambda: 5)
@@ -367,7 +470,7 @@ def test_extract_batches_run_independently_one_call_per_batch(monkeypatch) -> No
         containers=_containers_for_store(memories_store, turns_store=turns_store),
     )
 
-    out = service.extract_memories_dry("u1", "t1")
+    out = service.extract_memories_durable("u1", "t1")
 
     assert chat.calls == 3  # one LLM call per batch
     assert len(out["facts"]) == 3
@@ -386,7 +489,7 @@ def test_extract_quarantines_non_retryable_batch_but_keeps_others(monkeypatch) -
         containers=_containers_for_store(memories_store, turns_store=turns_store),
     )
 
-    out = service.extract_memories_dry("u1", "t1")
+    out = service.extract_memories_durable("u1", "t1")
 
     # Batches 1 and 3 produced facts; batch 2 was quarantined (no fact) ...
     assert len(out["facts"]) == 2
@@ -408,7 +511,7 @@ def test_extract_defers_retryable_batch_leaving_turns_unstamped(monkeypatch) -> 
         containers=_containers_for_store(memories_store, turns_store=turns_store),
     )
 
-    out = service.extract_memories_dry("u1", "t1")
+    out = service.extract_memories_durable("u1", "t1")
 
     # Batches 1 and 3 produced facts; batch 2 deferred (retryable) ...
     assert len(out["facts"]) == 2
@@ -416,6 +519,84 @@ def test_extract_defers_retryable_batch_leaving_turns_unstamped(monkeypatch) -> 
     assert len(out["processed_turn_docs"]) == 2
     stats = [u for u in out["updates"] if u.get("op") == "stats" and "deferred_turn_count" in u]
     assert stats and stats[0]["deferred_turn_count"] == 1
+
+
+def test_extract_memories_returns_deferred_turn_count_for_retryable_batch() -> None:
+    chat = _BatchChat(fail_on_call=1, error=Exception("Error code: 429 rate limit"))
+    memories_store = _Store([])
+    turns = [_turn(i) for i in range(3)]
+    turns_store = _Store(turns)
+    service = PipelineService(
+        memories_store,
+        chat,
+        _SyncEmbeddings(),
+        containers=_containers_for_store(memories_store, turns_store=turns_store),
+    )
+
+    counts = service.extract_memories("u1", "t1")
+
+    assert counts["deferred_turn_count"] == len(turns)
+    assert counts["quarantined_turn_count"] == 0
+    assert all("extracted_at" not in turn for turn in turns_store.docs)
+
+
+def test_extract_memories_returns_quarantined_turn_count_for_non_retryable_batch() -> None:
+    chat = _BatchChat(fail_on_call=1, error=Exception("Error code: 400 content_filter"))
+    memories_store = _Store([])
+    turns = [_turn(i) for i in range(3)]
+    turns_store = _Store(turns)
+    service = PipelineService(
+        memories_store,
+        chat,
+        _SyncEmbeddings(),
+        containers=_containers_for_store(memories_store, turns_store=turns_store),
+    )
+
+    counts = service.extract_memories("u1", "t1")
+
+    assert counts["deferred_turn_count"] == 0
+    assert counts["quarantined_turn_count"] == len(turns)
+    assert all("extracted_at" in turn for turn in turns_store.docs)
+
+
+@pytest.mark.asyncio
+async def test_async_extract_memories_returns_deferred_turn_count_for_retryable_batch() -> None:
+    chat = _AsyncBatchChat(fail_on_call=1, error=Exception("Error code: 429 rate limit"))
+    memories_store = _AsyncStore([])
+    turns = [_turn(i) for i in range(3)]
+    turns_store = _AsyncStore(turns)
+    service = AsyncPipelineService(
+        memories_store,
+        chat,
+        _AsyncEmbeddings(),
+        containers=_async_containers_for_store(memories_store, turns_store=turns_store),
+    )
+
+    counts = await service.extract_memories("u1", "t1")
+
+    assert counts["deferred_turn_count"] == len(turns)
+    assert counts["quarantined_turn_count"] == 0
+    assert all("extracted_at" not in turn for turn in turns_store.docs)
+
+
+@pytest.mark.asyncio
+async def test_async_extract_memories_returns_quarantined_turn_count_for_non_retryable_batch() -> None:
+    chat = _AsyncBatchChat(fail_on_call=1, error=Exception("Error code: 400 content_filter"))
+    memories_store = _AsyncStore([])
+    turns = [_turn(i) for i in range(3)]
+    turns_store = _AsyncStore(turns)
+    service = AsyncPipelineService(
+        memories_store,
+        chat,
+        _AsyncEmbeddings(),
+        containers=_async_containers_for_store(memories_store, turns_store=turns_store),
+    )
+
+    counts = await service.extract_memories("u1", "t1")
+
+    assert counts["deferred_turn_count"] == 0
+    assert counts["quarantined_turn_count"] == len(turns)
+    assert all("extracted_at" in turn for turn in turns_store.docs)
 
 
 def _agent_source_response() -> dict[str, Any]:
@@ -470,7 +651,7 @@ def test_agent_sourced_fact_is_tagged_and_stamped() -> None:
         containers=_containers_for_store(memories_store, turns_store=_Store([_turn(1)])),
     )
 
-    out = service.extract_memories_dry("u1", "t1")
+    out = service.extract_memories_durable("u1", "t1")
 
     agent_fact = _fact_by_text(out["facts"], "booked the user on flight")
     assert agent_fact["metadata"]["source"] == "agent"
@@ -496,7 +677,7 @@ async def test_async_agent_sourced_fact_is_tagged_and_stamped() -> None:
         containers=_async_containers_for_store(memories_store, turns_store=_AsyncStore([_turn(1)])),
     )
 
-    out = await service.extract_memories_dry("u1", "t1")
+    out = await service.extract_memories_durable("u1", "t1")
 
     agent_fact = _fact_by_text(out["facts"], "booked the user on flight")
     assert agent_fact["metadata"]["source"] == "agent"
@@ -520,7 +701,7 @@ def test_extraction_transcript_includes_turn_timestamps() -> None:
         containers=_containers_for_store(memories_store, turns_store=turns_store),
     )
 
-    service.extract_memories_dry("u1", "t1")
+    service.extract_memories_durable("u1", "t1")
 
     prompt_text = json.dumps(chat.messages)
     assert "2025-01-01T00:01:00+00:00 | user" in prompt_text
@@ -541,8 +722,38 @@ def test_extraction_transcript_canonicalizes_speaker_role() -> None:
         containers=_containers_for_store(memories_store, turns_store=turns_store),
     )
 
-    service.extract_memories_dry("u1", "t1")
+    service.extract_memories_durable("u1", "t1")
 
     prompt_text = json.dumps(chat.messages)
     assert "| agent]" in prompt_text
     assert "| assistant]" not in prompt_text
+
+
+def test_extract_memories_durable_clamps_out_of_range_fact_scores() -> None:
+    resp = {
+        "facts": [
+            {
+                "text": "The user loves hiking.",
+                "action": "ADD",
+                "category": "preference",
+                "confidence": 1.4,
+                "salience": -0.2,
+                "tags": [],
+            }
+        ],
+        "episodic": [],
+    }
+    memories_store = _Store([])
+    turns_store = _Store([_turn(1), _turn(2)])
+    service = PipelineService(
+        memories_store,
+        _SyncChat([resp]),
+        _SyncEmbeddings(),
+        containers=_containers_for_store(memories_store, turns_store=turns_store),
+    )
+
+    output = service.extract_memories_durable("u1", "t1")
+
+    assert len(output["facts"]) == 1
+    assert output["facts"][0]["confidence"] == 1.0
+    assert output["facts"][0]["salience"] == 0.0

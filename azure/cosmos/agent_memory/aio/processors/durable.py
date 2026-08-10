@@ -12,6 +12,10 @@ from azure.cosmos.agent_memory.processors.base import (
 
 logger = get_logger(__name__)
 
+# Set once we have warned that episodic memory is inert under the durable backend,
+# so the warning fires a single time per process rather than on every no-op call.
+_EPISODIC_DURABLE_WARNED = False
+
 
 class AsyncDurableFunctionProcessor:
     """Async mirror of :class:`DurableFunctionProcessor`.
@@ -44,6 +48,30 @@ class AsyncDurableFunctionProcessor:
     ) -> dict[str, int]:
         logger.debug(
             "AsyncDurableFunctionProcessor.process_extract_memories no-op user_id=%s thread_id=%s",
+            user_id,
+            thread_id,
+        )
+        return {}
+
+    async def process_extract_episodes(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> dict[str, int]:
+        # Episodic segmentation is in-process only; the Durable backend has no
+        # episodic path yet, so this is an explicit no-op (the auto-trigger also
+        # gates episode extraction to the in-process processor). Warn once so a
+        # durable-mode operator can see that episodic memory is not being produced.
+        global _EPISODIC_DURABLE_WARNED
+        if not _EPISODIC_DURABLE_WARNED:
+            _EPISODIC_DURABLE_WARNED = True
+            logger.warning(
+                "Episodic memory is not available under the Durable Functions backend "
+                "(no episodic write path yet); episode extraction is a no-op in durable mode."
+            )
+        logger.debug(
+            "AsyncDurableFunctionProcessor.process_extract_episodes no-op user_id=%s thread_id=%s",
             user_id,
             thread_id,
         )

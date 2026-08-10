@@ -344,19 +344,21 @@ def test_search_all_stopwords_falls_back_to_vector_only():
 
 
 def test_search_episodic_forwards_search_options():
-    store = MemoryStore(containers=_containers())
-    store.search = MagicMock(return_value=[])
+    memories = MagicMock()
+    memories.query_items.return_value = []
+    embeddings = MagicMock()
+    embeddings.generate.return_value = [0.1, 0.2]
+    store = MemoryStore(containers=_containers(memories=memories), embeddings_client=embeddings)
 
-    store.search_episodic("u1", "weather")
+    store.search_episodic("u1", "weather", top_k=3, min_salience=0.5)
 
-    store.search.assert_called_once_with(
-        search_terms="weather",
-        user_id="u1",
-        memory_types=["episodic"],
-        top_k=5,
-        min_salience=None,
-        include_superseded=False,
-    )
+    kwargs = memories.query_items.call_args.kwargs
+    assert "TOP 3" in kwargs["query"]
+    assert "c.type = @type" in kwargs["query"]
+    params = _params_by_name(kwargs)
+    assert params["@type"] == "episodic"
+    assert params["@user_id"] == "u1"
+    assert params["@min_salience"] == 0.5
 
 
 def test_build_episodic_context_forwards_search_options():

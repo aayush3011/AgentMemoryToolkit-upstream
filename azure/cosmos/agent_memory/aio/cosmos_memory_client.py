@@ -709,20 +709,35 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         min_confidence: Optional[float] = None,
         created_after: Optional[str | datetime] = None,
         created_before: Optional[str | datetime] = None,
+        include_episodes: bool = False,
         include_turns: bool = False,
         turn_top_k: Optional[int] = None,
         include_summaries: bool = False,
         summary_top_k: Optional[int] = None,
     ) -> list[dict[str, Any]]:
-        """Search memories using vector similarity, with optional summary / raw-turn
-        blending. See the sync client for details."""
+        """Search memories using vector similarity, with optional retrieval blending.
+
+        Facts + episodes in a single ranked query sharing one ``top_k`` budget
+        when ``include_episodes`` is True; facts only when False. Callers may
+        pass ``memory_types`` for other non-episodic types (``episodic`` is added
+        or removed by ``include_episodes``). Optional summaries/turns blend in
+        after the base block. See the sync client for full details."""
         store = self._get_store()
-        results = await store.search(
+        # Facts + episodes share one ranked query and one top_k budget: episodic
+        # is added when include_episodes is True and stripped when it is False.
+        if memory_types is not None:
+            base_memory_types = [t for t in memory_types if t != "episodic"]
+        else:
+            base_memory_types = ["fact"]
+        if include_episodes:
+            base_memory_types = [*base_memory_types, "episodic"]
+        base_memory_types = base_memory_types or ["fact"]
+        base = await store.search(
             search_terms=search_terms,
             memory_id=memory_id,
             user_id=user_id,
             role=role,
-            memory_types=memory_types,
+            memory_types=base_memory_types,
             thread_id=thread_id,
             top_k=top_k,
             tags_all=tags_all,
@@ -735,9 +750,20 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             created_before=created_before,
         )
         if not user_id:
-            return results
+            return base
 
-        seen_content = {str(r.get("content") or "").strip() for r in results}
+        results: list[dict[str, Any]] = []
+        seen_content: set[str] = set()
+
+        def _extend(docs: list[dict[str, Any]]) -> None:
+            for doc in docs:
+                content = str(doc.get("content") or "").strip()
+                if content and content not in seen_content:
+                    seen_content.add(content)
+                    results.append(doc)
+
+        _extend(base)
+
         if include_summaries:
             try:
                 summaries = await store.search_summaries(
@@ -750,13 +776,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("search_cosmos: include_summaries search failed (%s); skipping summaries", exc)
                 summaries = []
-            # Order is facts -> summaries -> raw turns: append summaries after the
-            # relevance-ranked memory hits (and before turns).
-            for s in summaries:
-                content = str(s.get("content") or "").strip()
-                if content and content not in seen_content:
-                    seen_content.add(content)
-                    results.append(s)
+            _extend(summaries)
 
         if include_turns:
             try:
@@ -773,11 +793,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("search_cosmos: include_turns turn search failed (%s); returning memories only", exc)
                 turns = []
-            for turn in turns:
-                content = str(turn.get("content") or "").strip()
-                if content and content not in seen_content:
-                    seen_content.add(content)
-                    results.append(turn)
+            _extend(turns)
         return results
 
     async def search_summaries(
@@ -898,6 +914,19 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             recent_k=recent_k,
         )
 
+    async def get_episodes(
+        self,
+        user_id: str,
+        thread_id: Optional[str] = None,
+        recent_k: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve active episodic memories for a user, newest first."""
+        return await self._get_store().get_episodes(
+            user_id=user_id,
+            thread_id=thread_id,
+            recent_k=recent_k,
+        )
+
     async def get_user_summary(self, user_id: str) -> Optional[dict[str, Any]]:
         return await self._get_store().get_user_summary(user_id=user_id)
 
@@ -988,6 +1017,30 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
 
     async def extract_memories(self, user_id: str, thread_id: str, recent_k: Optional[int] = None) -> dict[str, int]:
         return await self._get_pipeline().extract_memories(user_id, thread_id, recent_k)
+
+    async def extract_episodes(self, user_id: str, thread_id: str, *, flush: bool = False) -> dict[str, int]:
+        """Segment the thread's open turn stream into episodes at detected boundaries.
+
+        Episodes are created at idle time-gaps (detected only once a later turn
+        reveals the gap), topic shifts, and a max-size cap. A focused session
+        shorter than the max-size cap therefore episodizes only lazily - on the
+        next turn after the idle gap - and a one-shot session that never resumes
+        is not episodized at all under the auto path. Pass ``flush=True`` at the
+        end of a conversation  to drain the trailing open
+        segment immediately; integrators that know when a session ends should
+        call this on session close.
+
+        Only supported when the in-process backend owns processing; when a
+        Durable Function app is the active processor this raises
+        ``NotImplementedError`` so writes are not split away from that backend.
+        """
+        processor = self._get_processor()
+        if not isinstance(processor, AsyncInProcessProcessor):
+            raise NotImplementedError(
+                "Episode extraction runs in-process; manual invocation via the SDK is not "
+                "supported when the Durable Function app is the active processor."
+            )
+        return await self._get_pipeline().extract_episodes(user_id, thread_id, flush=flush)
 
     async def synthesize_procedural(self, user_id: str, *, force: bool = False) -> dict[str, Any]:
         processor = self._get_processor()

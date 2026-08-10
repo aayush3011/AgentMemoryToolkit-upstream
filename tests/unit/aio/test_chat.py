@@ -145,3 +145,62 @@ async def test_generate_returns_content():
 
     result = await client.generate([{"role": "user", "content": "hi"}])
     assert result == "hello world"
+
+
+def _api_status_error(status_code: int, headers: dict[str, str] | None = None):
+    import httpx
+    import openai
+
+    request = httpx.Request("POST", "https://test.openai.azure.com/openai/deployments/test/chat/completions")
+    response = httpx.Response(status_code, headers=headers or {}, request=request)
+    return openai.APIStatusError(message=f"status {status_code}", response=response, body=None)
+
+
+@pytest.mark.asyncio
+async def test_generate_retryable_api_error_honors_retry_after(monkeypatch):
+    client = AsyncChatClient(endpoint="https://test.openai.azure.com", api_key="key")
+    fake = MagicMock()
+    fake.chat.completions.create = AsyncMock(
+        side_effect=[
+            _api_status_error(503, {"retry-after": "30"}),
+            MagicMock(choices=[MagicMock(message=MagicMock(content="recovered"))], usage=None),
+        ]
+    )
+    client._client = fake
+    sleeps: list[float] = []
+
+    async def capture_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("azure.cosmos.agent_memory.chat.random.random", lambda: 0.0)
+    monkeypatch.setattr("azure.cosmos.agent_memory.aio.chat.asyncio.sleep", capture_sleep)
+
+    result = await client.generate([{"role": "user", "content": "hi"}], max_retries=2, base_delay=2.0)
+
+    assert result == "recovered"
+    assert sleeps == [30.0]
+
+
+@pytest.mark.asyncio
+async def test_generate_retryable_api_error_falls_back_without_retry_after(monkeypatch):
+    client = AsyncChatClient(endpoint="https://test.openai.azure.com", api_key="key")
+    fake = MagicMock()
+    fake.chat.completions.create = AsyncMock(
+        side_effect=[
+            _api_status_error(503),
+            MagicMock(choices=[MagicMock(message=MagicMock(content="recovered"))], usage=None),
+        ]
+    )
+    client._client = fake
+    sleeps: list[float] = []
+
+    async def capture_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("azure.cosmos.agent_memory.chat.random.random", lambda: 0.0)
+    monkeypatch.setattr("azure.cosmos.agent_memory.aio.chat.asyncio.sleep", capture_sleep)
+
+    result = await client.generate([{"role": "user", "content": "hi"}], max_retries=2, base_delay=2.0)
+
+    assert result == "recovered"
+    assert sleeps == [1.6]

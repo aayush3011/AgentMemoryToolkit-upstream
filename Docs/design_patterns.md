@@ -75,10 +75,10 @@ await mem.delete_cosmos(memory_id="<id>", user_id="user-1", thread_id=THREAD_ID)
 
 ### When to call
 
-- **End of conversation** — after the user closes a session or a support ticket is resolved.
-- **Long-running thread** — when a thread exceeds a token budget (e.g. > 50 turns) and you need a compact representation for context.
-- **Periodic background job** — on a schedule to keep summaries up to date for active threads.
-- **Automatic (change feed)** — set `THREAD_SUMMARY_EVERY_N` and the change feed trigger handles it. See [Section 8](#8-automatic-processing-with-change-feed).
+- **End of conversation** - after the user closes a session or a support ticket is resolved.
+- **Long-running thread** - when a thread exceeds a token budget (e.g. > 50 turns) and you need a compact representation for context.
+- **Periodic background job** - on a schedule to keep summaries up to date for active threads.
+- **Automatic (change feed)** - set `THREAD_SUMMARY_EVERY_N` and the change feed trigger handles it. See [Section 8](#8-automatic-processing-with-change-feed).
 
 Summaries are incremental: if one already exists for the thread, only newer turns are merged in.
 
@@ -101,10 +101,10 @@ The summary is stored automatically in Cosmos with id `summary_user-1_thread-abc
 
 ### When to call
 
-- **After each meaningful exchange** — extract facts from the latest turns so they are available for retrieval immediately.
-- **End of conversation** — capture all discrete preferences, decisions, and requirements from the thread.
-- **Before a planning step** — in multi-agent workflows, extract facts before handing context to a planner agent.
-- **Automatic (change feed)** — set `FACT_EXTRACTION_EVERY_N` and the change feed trigger handles it. See [Section 8](#8-automatic-processing-with-change-feed).
+- **After each meaningful exchange** - extract facts from the latest turns so they are available for retrieval immediately.
+- **End of conversation** - capture all discrete preferences, decisions, and requirements from the thread.
+- **Before a planning step** - in multi-agent workflows, extract facts before handing context to a planner agent.
+- **Automatic (change feed)** - set `FACT_EXTRACTION_EVERY_N` and the change feed trigger handles it. See [Section 8](#8-automatic-processing-with-change-feed).
 
 Each fact is stored as its own document with its own embedding, making it ideal for fine-grained semantic search.
 
@@ -124,10 +124,10 @@ result = await mem.extract_facts(
 
 ### When to call
 
-- **Cross-session onboarding** — at the start of a new thread, generate (or update) the user summary so the agent has context from all prior conversations.
-- **After a thread summary is created** — chain it: summarize the thread, then update the user summary.
-- **On a schedule** — for users with many threads, run periodically to keep the profile current.
-- **Automatic (change feed)** — set `USER_SUMMARY_EVERY_N` and the change feed trigger handles it. See [Section 8](#8-automatic-processing-with-change-feed).
+- **Cross-session onboarding** - at the start of a new thread, generate (or update) the user summary so the agent has context from all prior conversations.
+- **After a thread summary is created** - chain it: summarize the thread, then update the user summary.
+- **On a schedule** - for users with many threads, run periodically to keep the profile current.
+- **Automatic (change feed)** - set `USER_SUMMARY_EVERY_N` and the change feed trigger handles it. See [Section 8](#8-automatic-processing-with-change-feed).
 
 User summaries are also incremental. The pipeline merges only new thread data into the existing profile.
 
@@ -207,7 +207,7 @@ New session starts
   │
   │  ┌── Conversation loop ──┐
   │  │ Store each turn        │  (add_cosmos)
-  │  │ Optionally extract     │  (extract_facts — every N turns or on key exchanges)
+  │  │ Optionally extract     │  (extract_facts - every N turns or on key exchanges)
   │  └────────────────────────┘
   │
   ├─ Summarize the thread            (generate_thread_summary)
@@ -333,8 +333,8 @@ Set any value to `0` to disable that processing type. All three default to `0` (
 
 The change feed trigger needs two additional Cosmos DB containers beyond the existing `memories` container:
 
-- **`counter`** — stores lightweight per-thread and per-user message counters used for threshold checks
-- **`leases`** — auto-created by the Azure Functions runtime for change feed checkpointing
+- **`counter`** - stores lightweight per-thread and per-user message counters used for threshold checks
+- **`leases`** - auto-created by the Azure Functions runtime for change feed checkpointing
 
 The `COSMOS_DB__accountEndpoint` setting must also be configured for the identity-based change feed binding.
 

@@ -312,8 +312,6 @@ def _strip_unset_optional(data: dict[str, Any]) -> dict[str, Any]:
         "prompt_version",
         "last_used_at",
         "version",
-        "scope_type",
-        "scope_value",
     }
     drop_when_empty_list: set[str] = set()
     drop_when_zero = {"use_count"}
@@ -425,46 +423,51 @@ class FactRecord(MemoryRecordBase):
         return self
 
 
-_EPISODIC_ALLOWED_VALENCES = {"positive", "negative", "neutral", "mixed"}
+class EpisodeEvent(BaseModel):
+    sequence: int
+    description: str
+    occurred_at: Optional[str] = None
+    source_turn_ids: list[str] = Field(default_factory=list)
+
+
+class EpisodeOutcome(BaseModel):
+    status: Literal["successful", "partially_successful", "failed", "abandoned", "unknown"]
+    description: str
 
 
 class EpisodicRecord(MemoryRecordBase):
-    """A specific past experience: situation → action → outcome → lesson."""
+    """A specific past experience captured as an episode timeline."""
 
     memory_type: Literal[MemoryType.episodic] = Field(  # type: ignore[assignment]
         alias="type", default=MemoryType.episodic
     )
+    title: str
+    started_at: Optional[str] = None
+    ended_at: Optional[str] = None
+    participants: list[str] = Field(default_factory=list)
+    events: list[EpisodeEvent] = Field(default_factory=list)
+    outcome: Optional[EpisodeOutcome] = None
+    lessons: list[str] = Field(default_factory=list)
+    source_turn_ids: list[str] = Field(default_factory=list)
     content_hash: str
-    confidence: float = 0.5
-    scope_type: Optional[str] = None
-    scope_value: Optional[str] = None
     prompt_id: str
     prompt_version: str = "v1"
 
     _ID_PREFIX: ClassVar[Optional[str]] = "ep_"
 
     @model_validator(mode="after")
-    def _require_episodic_metadata(self) -> "EpisodicRecord":
-        meta = self.metadata if isinstance(self.metadata, dict) else None
-        if not meta:
-            raise ValueError(
-                "EpisodicRecord requires metadata.lesson, metadata.scope_type, "
-                "metadata.scope_value, and metadata.outcome_valence"
-            )
-        missing = [k for k in ("lesson", "scope_type", "scope_value", "outcome_valence") if not meta.get(k)]
-        if missing:
-            raise ValueError(f"EpisodicRecord missing required metadata field(s): {missing}")
-        valence = meta.get("outcome_valence")
-        if valence not in _EPISODIC_ALLOWED_VALENCES:
-            raise ValueError(
-                f"metadata.outcome_valence must be one of {sorted(_EPISODIC_ALLOWED_VALENCES)}, got {valence!r}"
-            )
-        # Mirror metadata.scope_* to top-level fields so queries that filter
-        # on the indexed top-level columns keep working.
-        if not self.scope_type:
-            object.__setattr__(self, "scope_type", meta.get("scope_type"))
-        if not self.scope_value:
-            object.__setattr__(self, "scope_value", meta.get("scope_value"))
+    def _validate_time_order(self) -> "EpisodicRecord":
+        if self.started_at is not None and self.ended_at is not None:
+            started = datetime.fromisoformat(self.started_at.strip().replace("Z", "+00:00"))
+            ended = datetime.fromisoformat(self.ended_at.strip().replace("Z", "+00:00"))
+            # Normalize naive values to UTC so a mixed naive/tz-aware pair compares
+            # safely instead of raising TypeError.
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            if ended.tzinfo is None:
+                ended = ended.replace(tzinfo=timezone.utc)
+            if ended < started:
+                raise ValueError("ended_at must not be before started_at")
         return self
 
 
@@ -597,6 +600,8 @@ __all__ = [
     "ThreadSummaryRecord",
     "UserSummaryRecord",
     "FactRecord",
+    "EpisodeEvent",
+    "EpisodeOutcome",
     "EpisodicRecord",
     "ProceduralRecord",
     "TYPED_RECORD_CLASSES",

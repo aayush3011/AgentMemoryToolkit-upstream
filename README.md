@@ -11,7 +11,7 @@
 [![YouTube](https://img.shields.io/badge/YouTube-Azure%20Cosmos%20DB-FF0000?logo=youtube&logoColor=white)](https://www.youtube.com/@AzureCosmosDB)
 
 
-Agent Memory Toolkit is a Python SDK for storing, retrieving, and transforming agent memories on Azure Cosmos DB. It gives your agent both raw conversation history and higher-value derived memory — thread summaries, extracted facts, and cross-thread user profiles — all searchable semantically. The processing pipeline can run **in-process** (zero infra) or in a sibling **Azure Durable Function app** that watches the Cosmos DB change feed. Sync (`CosmosMemoryClient`) and async (`AsyncCosmosMemoryClient`) APIs are mirror-images of each other.
+Agent Memory Toolkit is a Python SDK for storing, retrieving, and transforming agent memories on Azure Cosmos DB. It gives your agent both raw conversation history and higher-value derived memory - thread summaries, extracted facts, and cross-thread user profiles - all searchable semantically. The processing pipeline can run **in-process** (zero infra) or in a sibling **Azure Durable Function app** that watches the Cosmos DB change feed. Sync (`CosmosMemoryClient`) and async (`AsyncCosmosMemoryClient`) APIs are mirror-images of each other.
 
 
 ---
@@ -31,7 +31,7 @@ pip install ".[dev]"
 
 The toolkit needs a Cosmos DB account, an Azure OpenAI / AI Foundry deployment, and (optionally for the remote processor) an Azure Function app. Pick whichever path matches your situation:
 
-**Option A — One-command provision (`azd up`).** Creates everything from scratch — Cosmos + AI Foundry + Function app (Flex Consumption, idle cost ≈ $0) + UAMI + RBAC — and writes a working `.env` to `.azure/<env>/.env`:
+**Option A - One-command provision (`azd up`).** Creates everything from scratch - Cosmos + AI Foundry + Function app (Flex Consumption, idle cost ≈ $0) + UAMI + RBAC - and writes a working `.env` to `.azure/<env>/.env`:
 
 ```bash
 # Prereqs: az + azd installed; subscription with quota for gpt-4o-mini
@@ -51,7 +51,7 @@ azd up
 # are provisioned. Outputs are written to .azure/memorytoolkit-dev/.env
 ```
 
-The Function app is always provisioned but only used when you opt into `DurableFunctionProcessor` — it sits idle (and bills nothing) for in-process workloads.
+The Function app is always provisioned but only used when you opt into `DurableFunctionProcessor` - it sits idle (and bills nothing) for in-process workloads.
 
 Load the generated env vars and you're ready to use the SDK:
 
@@ -61,14 +61,14 @@ set -a && . ./.azure/memorytoolkit-dev/.env && set +a
 
 To tear everything down later: `azd down --purge` (the `--purge` flag skips Cosmos / AI Foundry soft-delete so names are immediately reusable).
 
-**Option B — Bring your own resources.** If you already have a Cosmos DB account and an AI Foundry / Azure OpenAI deployment, copy the env template and fill in the endpoints:
+**Option B - Bring your own resources.** If you already have a Cosmos DB account and an AI Foundry / Azure OpenAI deployment, copy the env template and fill in the endpoints:
 
 ```bash
 cp .env.template .env
 # edit COSMOS_DB_ENDPOINT, AI_FOUNDRY_ENDPOINT, AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME, AI_FOUNDRY_CHAT_DEPLOYMENT_NAME
 ```
 
-> For the Durable Function app counter-trigger settings, Bicep module reference, RBAC scopes, and the SDK-only escape hatch (`DEPLOY_FUNCTION_APP=false`) — see **[`infra/README.md`](infra/README.md)**.
+> For the Durable Function app counter-trigger settings, Bicep module reference, RBAC scopes, and the SDK-only escape hatch (`DEPLOY_FUNCTION_APP=false`) - see **[`infra/README.md`](infra/README.md)**.
 
 ### 3. Use the SDK
 
@@ -109,7 +109,7 @@ for h in hits:
 print(memory.get_user_summary(user_id=USER))
 ```
 
-> Async API is identical — just `await` each call:
+> Async API is identical - just `await` each call:
 > ```python
 > from azure.cosmos.agent_memory.aio import AsyncCosmosMemoryClient
 > ```
@@ -128,7 +128,7 @@ See [`Samples/`](Samples/) for end-to-end scenarios (chat memory, RAG, multi-age
 
 | Concept            | What it is                                                              | API                                                   |
 |--------------------|-------------------------------------------------------------------------|-------------------------------------------------------|
-| **Turn**           | One message (user or assistant) — the raw conversation atom             | `add_cosmos(...)`, `add_local(...)`                   |
+| **Turn**           | One message (user or assistant) - the raw conversation atom             | `add_cosmos(...)`, `add_local(...)`                   |
 | **Thread summary** | LLM-generated, incrementally updated rollup of a single thread          | `generate_thread_summary(...)`                        |
 | **Fact**           | Discrete, independently searchable assertion extracted from turns       | `extract_memories(...)`                               |
 | **Procedural**     | Behavioral rule / instruction the user wants followed                   | `extract_memories(...)`                               |
@@ -162,7 +162,7 @@ The `extract_memories` pipeline classifies each item it pulls from the conversat
 |---------|----------------------------------------------------|
 | 0.9–1.0 | Directly stated and unambiguous                    |
 | 0.7–0.9 | Clearly implied, no contradicting evidence         |
-| 0.5–0.7 | Inferred from context — plausible but not explicit |
+| 0.5–0.7 | Inferred from context - plausible but not explicit |
 | < 0.5   | Should be in `unclassified` instead                |
 
 Filter at retrieval time:
@@ -174,9 +174,9 @@ high_conf_facts = memory.get_memories(user_id="u1", memory_types=["fact"], min_c
 
 ### Memory Reconciliation
 
-`reconcile(user_id, n=50)` (on the public client; underlying pipeline method is `ProcessingPipeline.reconcile_memories`) resolves **semantic contradictions** in a single LLM pass over the N most-recent active facts, soft-deleting each loser with `supersede_reason="contradict"`. Paraphrased duplicates are *not* handled here — they are folded in place at write time by the LLM-free vector dedup (see below), so reconcile stays a bounded, convergent contradiction pass. See [Docs/concepts.md](Docs/concepts.md#memory-reconciliation) for details.
+`reconcile(user_id, n=50)` (on the public client; underlying pipeline method is `ProcessingPipeline.reconcile_memories`) resolves **semantic contradictions** in a single LLM pass over the N most-recent active facts, soft-deleting each loser with `supersede_reason="contradict"`. Paraphrased duplicates are *not* handled here - they are folded in place at write time by the LLM-free vector dedup (see below), so reconcile stays a bounded, convergent contradiction pass. See [Docs/concepts.md](Docs/concepts.md#memory-reconciliation) for details.
 
-> **Cost note.** Each reconciliation makes one LLM call covering up to `n` facts (default 50, hard cap 500). With auto-trigger, this fires every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns per user, with `n` taken from `DEDUP_POOL_SIZE`. The previous cosine-cluster pre-filter was removed deliberately — it could not catch semantic contradictions like "vegetarian" vs "ribeye steak" — so the LLM is now invoked whenever there are ≥ 2 active facts. To bound LLM cost more tightly: raise `DEDUP_EVERY_N` (lower frequency — reconcile fires every Nth extraction, so a *higher* N means *less often*), lower `DEDUP_POOL_SIZE` (smaller per-call pool), or override `n` per call when invoking `reconcile()` directly.
+> **Cost note.** Each reconciliation makes one LLM call covering up to `n` facts (default 50, hard cap 500). With auto-trigger, this fires every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns per user, with `n` taken from `DEDUP_POOL_SIZE`. The previous cosine-cluster pre-filter was removed deliberately - it could not catch semantic contradictions like "vegetarian" vs "ribeye steak" - so the LLM is now invoked whenever there are ≥ 2 active facts. To bound LLM cost more tightly: raise `DEDUP_EVERY_N` (lower frequency - reconcile fires every Nth extraction, so a *higher* N means *less often*), lower `DEDUP_POOL_SIZE` (smaller per-call pool), or override `n` per call when invoking `reconcile()` directly.
 
 | New `MemoryRecord` field | Meaning                                                                     |
 |--------------------------|-----------------------------------------------------------------------------|
@@ -197,13 +197,13 @@ By default, the **InProcess processor** runs each pipeline step independently as
 | `THREAD_SUMMARY_EVERY_N`  | `10`             | `process_thread_summary`                                                                                          | scheduled via `asyncio.create_task` |
 | `USER_SUMMARY_EVERY_N`    | `20`             | `process_user_summary`                                                                                            | scheduled via `asyncio.create_task` |
 
-Each `*_EVERY_N=0` disables only that step. Dedup is gated independently of extract because cross-thread dedup is dramatically more expensive than per-thread extract (it reads every active fact for the user) — running it on every extract slammed AI Foundry. The Durable backend uses the same defaults via the change-feed function app (the function-app `azd` deploy bumps `FACT_EXTRACTION_EVERY_N` to `5` since the FA path is intended for higher-volume workloads). Calling `process_now()` is normally redundant — it remains as an explicit "process now" hook for tests, manual workflows, and operators who set every threshold to `0`.
+Each `*_EVERY_N=0` disables only that step. Dedup is gated independently of extract because cross-thread dedup is dramatically more expensive than per-thread extract (it reads every active fact for the user) - running it on every extract slammed AI Foundry. The Durable backend uses the same defaults via the change-feed function app (the function-app `azd` deploy bumps `FACT_EXTRACTION_EVERY_N` to `5` since the FA path is intended for higher-volume workloads). Calling `process_now()` is normally redundant - it remains as an explicit "process now" hook for tests, manual workflows, and operators who set every threshold to `0`.
 
 The async client (`AsyncCosmosMemoryClient.push_to_cosmos`) does **not** await the auto-trigger; it schedules it as a background `asyncio.Task` so the write call returns as soon as the Cosmos upserts complete. Background failures are surfaced via `logger.warning` (search for `"Background auto-trigger task failed"`).
 
 #### Backend exclusivity (`MEMORY_PROCESSOR_OWNER`)
 
-Both the SDK auto-trigger and the function-app change-feed processor write into the same `counter` container. If you accidentally point an `InProcessProcessor` at a Cosmos container that already has a function app attached, both backends will run the pipeline on the same writes — double extraction, double dedup, double counters.
+Both the SDK auto-trigger and the function-app change-feed processor write into the same `counter` container. If you accidentally point an `InProcessProcessor` at a Cosmos container that already has a function app attached, both backends will run the pipeline on the same writes - double extraction, double dedup, double counters.
 
 Set the env var on **both sides** to make ownership explicit:
 
@@ -215,7 +215,7 @@ Set the env var on **both sides** to make ownership explicit:
 
 The default (unset) preserves backward compatibility. For any production deployment we recommend setting it on both sides so a misconfiguration produces a loud log line instead of silent double-work.
 
-> **Advisory, not enforced.** `MEMORY_PROCESSOR_OWNER` is operator-configured exclusivity, not a server-side lock. Each backend reads its own env var; if the SDK is set to `inprocess` but the FA forgets to set `durable` (or vice versa), both still run. As a backstop, every counter write stamps `last_owner=<this backend>` on the doc — when the SDK observes a counter previously written by `durable` (or vice versa), it logs a one-shot `WARN` so misconfiguration surfaces in logs without spamming. Treat this as a configuration audit signal, not a hard guarantee.
+> **Advisory, not enforced.** `MEMORY_PROCESSOR_OWNER` is operator-configured exclusivity, not a server-side lock. Each backend reads its own env var; if the SDK is set to `inprocess` but the FA forgets to set `durable` (or vice versa), both still run. As a backstop, every counter write stamps `last_owner=<this backend>` on the doc - when the SDK observes a counter previously written by `durable` (or vice versa), it logs a one-shot `WARN` so misconfiguration surfaces in logs without spamming. Treat this as a configuration audit signal, not a hard guarantee.
 
 ---
 
@@ -225,7 +225,7 @@ Pick at construction time via the `processor=` kwarg.
 
 |                          | `InProcessProcessor` (default)    | `DurableFunctionProcessor`                           |
 |--------------------------|-----------------------------------|------------------------------------------------------|
-| Infra                    | None — just `pip install`         | Sibling Azure Function app                           |
+| Infra                    | None - just `pip install`         | Sibling Azure Function app                           |
 | Best for                 | Prototypes, low TPS, single-agent | Fleet / multi-agent / high TPS                       |
 | `process_now()`          | Synchronous, returns when done    | No-op (work runs async on change feed)               |
 | `process_now_and_wait()` | Returns immediately after flush   | Polls until summary visible (RU-costly; tests/demos) |
@@ -236,7 +236,7 @@ from azure.cosmos.agent_memory import CosmosMemoryClient, DurableFunctionProcess
 memory = CosmosMemoryClient(..., processor=DurableFunctionProcessor())
 ```
 
-`DurableFunctionProcessor` is a thin marker — there is no SDK→Function HTTP call. The SDK just writes turns; the deployed Function app picks them up via the Cosmos change feed. Counter-based trigger configuration and Bicep module reference live in [`infra/README.md`](infra/README.md).
+`DurableFunctionProcessor` is a thin marker - there is no SDK→Function HTTP call. The SDK just writes turns; the deployed Function app picks them up via the Cosmos change feed. Counter-based trigger configuration and Bicep module reference live in [`infra/README.md`](infra/README.md).
 
 ---
 
@@ -267,13 +267,13 @@ memory = CosmosMemoryClient(..., processor=DurableFunctionProcessor())
 
 | Symbol                               | Module                          | Purpose                                                                                |
 |--------------------------------------|---------------------------------|----------------------------------------------------------------------------------------|
-| `CosmosMemoryClient`                 | `azure.cosmos.agent_memory`     | Sync client — local CRUD, Cosmos DB I/O, processing                                    |
+| `CosmosMemoryClient`                 | `azure.cosmos.agent_memory`     | Sync client - local CRUD, Cosmos DB I/O, processing                                    |
 | `AsyncCosmosMemoryClient`            | `azure.cosmos.agent_memory.aio` | Async mirror                                                                           |
 | `MemoryProcessor`                    | `azure.cosmos.agent_memory`     | Protocol that any processor backend implements                                         |
-| `InProcessProcessor`                 | `azure.cosmos.agent_memory`     | Default backend — runs the pipeline in-process                                         |
-| `DurableFunctionProcessor`           | `azure.cosmos.agent_memory`     | Marker backend — work runs in sibling Function app via change feed                     |
-| `client.process_now()`               | —                               | Run the pipeline for recent turns (in-process) or no-op (remote)                       |
-| `client.process_now_and_wait()`      | —                               | Opt-in poll until processing completes; useful for tests/demos with the remote backend |
+| `InProcessProcessor`                 | `azure.cosmos.agent_memory`     | Default backend - runs the pipeline in-process                                         |
+| `DurableFunctionProcessor`           | `azure.cosmos.agent_memory`     | Marker backend - work runs in sibling Function app via change feed                     |
+| `client.process_now()`               | -                               | Run the pipeline for recent turns (in-process) or no-op (remote)                       |
+| `client.process_now_and_wait()`      | -                               | Opt-in poll until processing completes; useful for tests/demos with the remote backend |
 | `MemoryRecord`, `MemoryType`, `Role` | `azure.cosmos.agent_memory`     | Pydantic models / enums                                                                |
 
 Async equivalents (`AsyncInProcessProcessor`, `AsyncDurableFunctionProcessor`) live in `azure.cosmos.agent_memory.aio`.
@@ -282,12 +282,12 @@ Async equivalents (`AsyncInProcessProcessor`, `AsyncDurableFunctionProcessor`) l
 
 ## Documentation
 
-- **[Docs/concepts.md](Docs/concepts.md)** — Memory types, threads, roles, embeddings, processing pipeline
-- **[Docs/design_patterns.md](Docs/design_patterns.md)** — Integration patterns for chat apps and multi-agent systems
-- **[Docs/local_testing.md](Docs/local_testing.md)** — Prerequisites, environment setup, running locally, debugging
-- **[Docs/azure_testing.md](Docs/azure_testing.md)** — Azure deployment, RBAC, cloud validation
-- **[infra/README.md](infra/README.md)** — `azd` deployment, Bicep modules, RBAC, counter-trigger tuning, SDK-only mode
-- **[Docs/troubleshooting.md](Docs/troubleshooting.md)** — Common issues and resolutions for setup, auth, Cosmos DB, embeddings, Durable Functions, vector search, change feed, etc.
+- **[Docs/concepts.md](Docs/concepts.md)** - Memory types, threads, roles, embeddings, processing pipeline
+- **[Docs/design_patterns.md](Docs/design_patterns.md)** - Integration patterns for chat apps and multi-agent systems
+- **[Docs/local_testing.md](Docs/local_testing.md)** - Prerequisites, environment setup, running locally, debugging
+- **[Docs/azure_testing.md](Docs/azure_testing.md)** - Azure deployment, RBAC, cloud validation
+- **[infra/README.md](infra/README.md)** - `azd` deployment, Bicep modules, RBAC, counter-trigger tuning, SDK-only mode
+- **[Docs/troubleshooting.md](Docs/troubleshooting.md)** - Common issues and resolutions for setup, auth, Cosmos DB, embeddings, Durable Functions, vector search, change feed, etc.
 
 ---
 
@@ -298,7 +298,7 @@ azure/cosmos/agent_memory/   Python SDK (sync + aio mirror)
   processors/           MemoryProcessor Protocol + InProcess/Durable backends
 function_app/           Sibling Azure Durable Function app
 infra/                  Bicep modules + main.bicep for `azd up`
-azure.yaml              `azd` config — provisions Cosmos + AI Foundry + Function app
+azure.yaml              `azd` config - provisions Cosmos + AI Foundry + Function app
 Samples/                Categorized demo notebooks + sample scripts
 Docs/                   Conceptual + operational docs
 tests/                  Unit + integration tests (pytest)
@@ -309,7 +309,7 @@ tests/                  Unit + integration tests (pytest)
 ## Migration notes
 
 - **`azure.cosmos.agent_memory.processing.ProcessingClient` is removed.** Drop the import and call `client.process_now()` (or `client.process_now_and_wait()`) instead. Same for the async `AsyncProcessingClient`.
-- **New `processor=` kwarg.** Defaults to `InProcessProcessor()` — existing code keeps its current behavior with no edits.
+- **New `processor=` kwarg.** Defaults to `InProcessProcessor()` - existing code keeps its current behavior with no edits.
 - **`adf_endpoint` / `adf_key` constructor kwargs are gone.** The SDK no longer makes HTTP calls to the Function app at runtime; the Function app reads from the Cosmos change feed.
 
 ## Trademark notice

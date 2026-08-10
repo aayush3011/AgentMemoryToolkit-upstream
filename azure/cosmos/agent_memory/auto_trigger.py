@@ -102,9 +102,10 @@ def maybe_trigger_steps(
 
     n_facts = _threshold_int(thresholds, "get_fact_extraction_every_n", "FACT_EXTRACTION_EVERY_N")
     n_summary = _threshold_int(thresholds, "get_thread_summary_every_n", "THREAD_SUMMARY_EVERY_N")
+    n_episode = _threshold_int(thresholds, "get_episode_eval_every_n", "EPISODE_EVAL_EVERY_N")
     n_user = _threshold_int(thresholds, "get_user_summary_every_n", "USER_SUMMARY_EVERY_N")
     n_dedup = _threshold_int(thresholds, "get_dedup_every_n", "DEDUP_EVERY_N")
-    if n_facts == 0 and n_summary == 0 and n_user == 0:
+    if n_facts == 0 and n_summary == 0 and n_episode == 0 and n_user == 0:
         return
 
     n_dedup_turns = n_facts * n_dedup if n_facts > 0 and n_dedup > 0 else 0
@@ -114,6 +115,7 @@ def maybe_trigger_steps(
         turn_counts,
         n_facts=n_facts,
         n_summary=n_summary,
+        n_episode=n_episode,
         n_dedup_turns=n_dedup_turns,
         thresholds=thresholds,
     )
@@ -127,6 +129,7 @@ def _trigger_thread_steps(
     *,
     n_facts: int,
     n_summary: int,
+    n_episode: int,
     n_dedup_turns: int,
     thresholds: Any = None,
 ) -> dict[str, int]:
@@ -157,6 +160,7 @@ def _trigger_thread_steps(
             new_count=new_count,
             fire_extract=n_facts > 0 and _counters.crosses_threshold(old_count, new_count, n_facts),
             fire_summary=n_summary > 0 and _counters.crosses_threshold(old_count, new_count, n_summary),
+            fire_episode=n_episode > 0 and _counters.crosses_threshold(old_count, new_count, n_episode),
             fire_dedup=n_dedup_turns > 0 and _counters.crosses_threshold(old_count, new_count, n_dedup_turns),
             thresholds=thresholds,
         )
@@ -173,6 +177,7 @@ def _fire_thread_steps(
     new_count: int,
     fire_extract: bool,
     fire_summary: bool,
+    fire_episode: bool,
     fire_dedup: bool,
     thresholds: Any = None,
 ) -> None:
@@ -202,6 +207,11 @@ def _fire_thread_steps(
             fire_procedural,
             "synthesize_procedural",
             lambda: processor.synthesize_procedural(user_id=user_id),
+        ),
+        (
+            fire_episode,
+            "process_extract_episodes",
+            lambda: processor.process_extract_episodes(user_id=user_id, thread_id=thread_id),
         ),
         (
             fire_summary,

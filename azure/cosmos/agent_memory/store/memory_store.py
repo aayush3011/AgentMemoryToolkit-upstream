@@ -231,10 +231,11 @@ class MemoryStore:
             if memory_type == "fact":
                 meta.setdefault("category", "unclassified:manual")
             elif memory_type == "episodic":
-                meta.setdefault("lesson", content)
-                meta.setdefault("scope_type", "manual")
-                meta.setdefault("scope_value", "manual")
-                meta.setdefault("outcome_valence", "neutral")
+                kwargs.setdefault("title", content[:80] or "Manual episode")
+                kwargs.setdefault("events", [])
+                kwargs.setdefault("participants", [])
+                kwargs.setdefault("lessons", [])
+                kwargs.setdefault("source_turn_ids", [])
             elif memory_type == "procedural":
                 kwargs.setdefault("source_fact_ids", ["manual"])
             kwargs["metadata"] = meta
@@ -568,6 +569,35 @@ class MemoryStore:
             partition_key=[user_id, thread_id],
             operation="get_thread_summary query",
             container=self._summaries_container,
+        )
+
+    def get_episodes(
+        self,
+        user_id: str,
+        thread_id: Optional[str] = None,
+        recent_k: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve active episodic memories for ``user_id``, newest first."""
+        if not user_id:
+            raise ValidationError("user_id is required for get_episodes")
+        qb = _QueryBuilder()
+        qb.add_filter("c.type", "@type", "episodic")
+        qb.add_filter("c.user_id", "@user_id", user_id)
+        qb.add_filter("c.thread_id", "@thread_id", thread_id)
+        qb.add_is_null_or_undefined("c.superseded_by")
+        parameters = qb.get_parameters()
+        if recent_k is not None:
+            parameters.append({"name": "@recent_k", "value": recent_k})
+            sql = f"SELECT TOP @recent_k * FROM c{qb.build_where()} ORDER BY c.created_at DESC"
+        else:
+            sql = f"SELECT * FROM c{qb.build_where()} ORDER BY c.created_at DESC"
+        partition_key, cross_partition = query_scope(user_id, thread_id)
+        return self.query(
+            sql,
+            parameters,
+            container_key=ContainerKey.MEMORIES,
+            partition_key=partition_key,
+            cross_partition=cross_partition,
         )
 
     def get_user_summary(self, user_id: str) -> Optional[dict[str, Any]]:
@@ -1083,15 +1113,75 @@ class MemoryStore:
         top_k: int = 5,
         min_salience: Optional[float] = None,
         include_superseded: bool = False,
+        thread_id: Optional[str] = None,
+        tags_all: Optional[list[str]] = None,
+        tags_any: Optional[list[str]] = None,
+        exclude_tags: Optional[list[str]] = None,
+        created_after: Optional[str | datetime] = None,
+        created_before: Optional[str | datetime] = None,
+        started_after: Optional[str | datetime] = None,
+        started_before: Optional[str | datetime] = None,
+        ended_after: Optional[str | datetime] = None,
+        ended_before: Optional[str | datetime] = None,
     ) -> list[dict[str, Any]]:
-        """Semantic search across episodic memories for a user."""
-        return self.search(
-            search_terms=search_terms,
-            user_id=user_id,
-            memory_types=["episodic"],
-            top_k=top_k,
-            min_salience=min_salience,
+        """Semantic search across episodic memories for a user.
+
+        Temporal arguments are filters only; relevance ranking is vector/FTS-only.
+        """
+        if not user_id:
+            raise ValidationError("user_id is required for search_episodic")
+        terms = require_search_terms(search_terms)
+        top = top_literal(top_k, name="top_k")
+        query_vector = self._embed(terms)
+        keywords = extract_keywords(terms)
+
+        qb = _QueryBuilder()
+        qb.add_filter("c.type", "@type", "episodic")
+        qb.add_filter("c.user_id", "@user_id", user_id)
+        qb.add_filter("c.thread_id", "@thread_id", thread_id)
+        add_tag_filters(qb, tags_all=tags_all, tags_any=tags_any, exclude_tags=exclude_tags)
+        qb.add_time_range(
+            "c.created_at",
+            after=_coerce_datetime_iso(created_after),
+            before=_coerce_datetime_iso(created_before),
+            after_param="@created_after",
+            before_param="@created_before",
+        )
+        qb.add_time_range(
+            "c.started_at",
+            after=_coerce_datetime_iso(started_after),
+            before=_coerce_datetime_iso(started_before),
+            after_param="@started_after",
+            before_param="@started_before",
+        )
+        qb.add_time_range(
+            "c.ended_at",
+            after=_coerce_datetime_iso(ended_after),
+            before=_coerce_datetime_iso(ended_before),
+            after_param="@ended_after",
+            before_param="@ended_before",
+        )
+        add_salience_filter(qb, min_salience)
+
+        sql = build_search_sql(
+            qb=qb,
+            top=top,
+            keyword_count=len(keywords),
             include_superseded=include_superseded,
+        )
+        parameters = qb.get_parameters()
+        parameters.append({"name": "@embedding", "value": query_vector})
+        for i, kw in enumerate(keywords):
+            parameters.append({"name": f"@kw{i}", "value": kw})
+
+        partition_key, cross_partition = query_scope(user_id, thread_id)
+        logger.debug("MemoryStore.search_episodic query: %s", sql)
+        return self.query(
+            sql,
+            parameters,
+            container_key=ContainerKey.MEMORIES,
+            partition_key=partition_key,
+            cross_partition=cross_partition,
         )
 
     def build_episodic_context(self, user_id: str, query: str, top_k: int = 3) -> str:

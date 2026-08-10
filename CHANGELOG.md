@@ -70,7 +70,7 @@
 * `ProcessThreadResult` gains `procedural` and `user_summary` fields. `extract_memories` returns a `dropped_episodic_count` for monitoring LLM-extraction quality.See [PR:#20](https://github.com/aayush3011/AgentMemoryToolkit/pull/20)
 
 
-## [0.1.0b1] — 2026-06-01
+## [0.1.0b1] - 2026-06-01
 
 
 Initial public preview release.
@@ -91,7 +91,7 @@ Pin a specific version when integrating.
   tag filters, and per-type scoping.
 - Built-in memory processing pipeline: fact extraction, thread/user
   summarization, procedural-memory synthesis, contradiction handling, and
-  deduplication — all driven by versioned `.prompty` prompts.
+  deduplication - all driven by versioned `.prompty` prompts.
 - Two processor backends: `InProcessProcessor` (default, runs in your
   application process) and `DurableFunctionProcessor` (offloads work to a
   sibling Azure Function app via Cosmos DB change feed).

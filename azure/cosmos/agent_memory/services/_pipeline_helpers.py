@@ -9,18 +9,178 @@ LLM call itself stays on the service.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import os
 import re
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
 from azure.cosmos.agent_memory._embedding_tokens import count_tokens
+from azure.cosmos.agent_memory._utils import cosine_similarity, vector_centroid
 from azure.cosmos.agent_memory.exceptions import LLMError
 from azure.cosmos.agent_memory.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def parse_iso_datetime(value: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 string to a tz-aware datetime (UTC assumed for naive
+    values), or return ``None`` if it is missing or unparseable.
+
+    Pure: used to validate/normalize model-supplied episode timestamps without
+    raising, so callers can fall back to grounded segment bounds.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def is_valid_time_pair(started: Any, ended: Any) -> bool:
+    """True iff both values parse as ISO-8601 datetimes with ``started <= ended``.
+
+    Naive and tz-aware values are normalized to UTC before comparison, so a
+    mixed pair (e.g. a naive date plus a tz-aware datetime) compares safely
+    instead of raising ``TypeError``.
+    """
+    start = parse_iso_datetime(started)
+    end = parse_iso_datetime(ended)
+    return start is not None and end is not None and start <= end
+
+
+def clamp_unit_interval(value: Any, default: float) -> float:
+    """Clamp a number into ``[0.0, 1.0]``; return ``default`` if it is not a
+    finite number.
+
+    The strict LLM ``json_schema`` constrains the field type (number) but not
+    its range, so salience / confidence can arrive out of range (e.g. 1.4 or
+    -0.2). Normalizing rather than raising keeps the episode instead of dropping
+    it over a slightly-off score.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    v = float(value)
+    if not math.isfinite(v):
+        return default
+    return max(0.0, min(1.0, v))
+
+
+# ---------------------------------------------------------------------------
+# Episode boundary segmentation - pure helpers shared by the sync and aio
+# pipelines. IO-free: functions of their inputs (plus threshold values passed
+# in), so the two pipelines share one implementation instead of hand-mirroring.
+# ---------------------------------------------------------------------------
+
+
+def turn_gap_seconds(prev_turn: dict[str, Any], cur_turn: dict[str, Any]) -> Optional[float]:
+    """Seconds between two consecutive turns' ``created_at``, or None if either
+    timestamp is missing/unparseable (the idle-gap check then abstains)."""
+    prev_ts = parse_iso_datetime(prev_turn.get("created_at"))
+    cur_ts = parse_iso_datetime(cur_turn.get("created_at"))
+    if prev_ts is None or cur_ts is None:
+        return None
+    return (cur_ts - prev_ts).total_seconds()
+
+
+def segment_time_bounds(items: list[dict[str, Any]]) -> tuple[Optional[str], Optional[str]]:
+    """Return (earliest, latest) turn ``created_at`` in a segment, or (None, None).
+
+    Used to ground an episode's started_at/ended_at in its actual turn window
+    when the model omits them - for the conversational benchmarks each turn's
+    created_at carries the session date, so this yields correct temporal spans.
+
+    Ordering is by PARSED datetime, not lexical string order: mixed UTC offsets
+    (e.g. ``+05:00`` vs ``Z``) sort correctly instead of producing an inverted
+    ``(started, ended)`` pair that would later fail ``_validate_time_order``. The
+    original ISO strings are returned unchanged.
+    """
+    parsed: list[tuple[datetime, str]] = []
+    for item in items:
+        raw = item.get("created_at")
+        if not isinstance(raw, str) or not raw:
+            continue
+        dt = parse_iso_datetime(raw)
+        if dt is not None:
+            parsed.append((dt, raw))
+    if not parsed:
+        return None, None
+    parsed.sort(key=lambda pair: pair[0])
+    return parsed[0][1], parsed[-1][1]
+
+
+def created_at_sort_key(item: dict[str, Any]) -> tuple[int, float, str]:
+    """Total, chronological, stable sort key for a turn by ``created_at``.
+
+    Orders by PARSED instant (so mixed UTC offsets sort by true time, not lexical
+    string) and breaks ties on ``id`` so turns sharing one timestamp - common
+    when many turns carry the same session date - keep a deterministic order. A
+    stable order matters because the open segment's first/last turn ids seed the
+    ``segment_key`` that grounds the deterministic episode id: an unstable order
+    could shift that id between runs and admit a duplicate episode. Missing or
+    unparseable timestamps sort last, deterministically by id.
+    """
+    dt = parse_iso_datetime(item.get("created_at"))
+    if dt is None:
+        return (1, 0.0, str(item.get("id") or ""))
+    return (0, dt.timestamp(), str(item.get("id") or ""))
+
+
+def deterministic_episode_id(segment_key: str, index: int) -> str:
+    """Identity from the STABLE segment key plus the episode's ordinal within the
+    segment - never the LLM summary text - so re-running the same un-stamped
+    segment yields the same id and the duplicate write is skipped (409)."""
+    seed = ID_SEED_SEP.join((segment_key, str(index)))
+    return f"ep_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
+
+
+def find_episode_boundary(
+    segment: list[dict[str, Any]],
+    embeddings: list[list[float]],
+    *,
+    max_turns: int,
+    idle_gap: int,
+    drift: float,
+    min_turns: int,
+) -> Optional[int]:
+    """Return the exclusive end index of the earliest episode boundary in the
+    open segment, or ``None`` if the segment is still open.
+
+    Signals, earliest wins: (1) an idle time-gap between two consecutive turns,
+    (2) a topic-drift shift of a new turn away from the segment centroid, and
+    (3) a max-size cap that force-closes an over-long segment. Idle-gap and drift
+    boundaries below ``min_turns`` are suppressed so a lone turn is not emitted as
+    a trivial episode; the max-size cap is a hard ceiling and is not floored.
+    Boundaries are temporal/semantic only; prior episodes are never mutated.
+    """
+    n = len(segment)
+    if n == 0:
+        return None
+    min_turns = max(1, min_turns)
+    has_embeddings = bool(embeddings) and len(embeddings) == n
+    for i in range(1, n):
+        if max_turns > 0 and i >= max_turns:
+            return i
+        if idle_gap > 0 and i >= min_turns:
+            gap = turn_gap_seconds(segment[i - 1], segment[i])
+            if gap is not None and gap > idle_gap:
+                return i
+        if drift > 0 and i >= min_turns and has_embeddings:
+            centroid = vector_centroid(embeddings[:i])
+            if centroid and (1.0 - cosine_similarity(embeddings[i], centroid)) > drift:
+                return i
+    if max_turns > 0 and n >= max_turns:
+        return max_turns
+    return None
+
 
 _NON_RETRYABLE_LLM_MARKERS = (
     "content_filter",
@@ -29,9 +189,21 @@ _NON_RETRYABLE_LLM_MARKERS = (
     "maximum context length",
 )
 
+# Programming errors, not provider failures: a bug in our own extraction/parse
+# code (e.g. calling ``.get`` on a non-dict, indexing past the end) raises one of
+# these. They are deterministic, so retrying re-fails identically and would wedge
+# the segment/batch forever - classify them non-retryable so the poison input is
+# quarantined and surfaced rather than deferred indefinitely. Note this is a
+# narrow allow-list of true code-bug types, NOT "any non-LLMError": genuine
+# transient provider failures (rate-limit / timeout / connection) are their own
+# SDK exception types and must stay retryable.
+_NON_RETRYABLE_EXC_TYPES = (AttributeError, KeyError, TypeError, IndexError, NameError)
+
 
 def is_retryable_llm_error(exc: BaseException) -> bool:
     """Classify an extraction LLM failure as retryable (transient) or not."""
+    if isinstance(exc, _NON_RETRYABLE_EXC_TYPES):
+        return False
     text = str(exc).lower()
     return not any(marker in text for marker in _NON_RETRYABLE_LLM_MARKERS)
 
@@ -396,214 +568,6 @@ def _canonical_speaker(role: Any) -> str:
     return _SPEAKER_ALIASES.get(normalized, str(role or "unknown"))
 
 
-# Stopwords stripped from grounding checks. Keep this list short and focused
-# on tokens that carry no factual content; any word a memory might legitimately
-# differ on (e.g. "not", "no") must NOT be added here.
-_GROUNDING_STOPWORDS = frozenset(
-    {
-        "the",
-        "a",
-        "an",
-        "is",
-        "are",
-        "was",
-        "were",
-        "be",
-        "been",
-        "being",
-        "and",
-        "or",
-        "but",
-        "to",
-        "of",
-        "for",
-        "on",
-        "in",
-        "at",
-        "by",
-        "with",
-        "from",
-        "as",
-        "that",
-        "this",
-        "these",
-        "those",
-        "it",
-        "its",
-        "user",
-        "they",
-        "them",
-        "their",
-        "he",
-        "she",
-        "his",
-        "her",
-        "him",
-        "has",
-        "have",
-        "had",
-        "do",
-        "does",
-        "did",
-        "will",
-        "would",
-        "should",
-        "can",
-        "could",
-        "may",
-        "might",
-        "must",
-        "say",
-        "says",
-        "said",
-        "saying",
-        "tell",
-        "tells",
-        "told",
-        "ask",
-        "asks",
-        "asked",
-        "mention",
-        "mentions",
-        "mentioned",
-        "stated",
-        "noted",
-        "added",
-        "replied",
-        "want",
-        "wants",
-        "wanted",
-        "decide",
-        "decides",
-        "decided",
-        "propose",
-        "proposes",
-        "proposed",
-        "suggest",
-        "suggests",
-        "suggested",
-        "planned",
-        "choose",
-        "chooses",
-        "chose",
-        "like",
-        "likes",
-        "liked",
-        "later",
-        "then",
-        "also",
-        "again",
-    }
-)
-
-_GROUNDING_TOKEN_RE = re.compile(r"[a-zA-Z]{3,}")
-
-
-def _grounding_tokens(text: str) -> set[str]:
-    """Tokenize text into lowercased content words (>=3 chars, stopwords removed)."""
-    if not text:
-        return set()
-    return {t for t in _GROUNDING_TOKEN_RE.findall(text.lower()) if t not in _GROUNDING_STOPWORDS}
-
-
-def check_extracted_fact_grounding(
-    fact_docs: list[dict[str, Any]],
-    turn_items: list[dict[str, Any]],
-    existing_facts: list[dict[str, Any]],
-    *,
-    user_id: str,
-    thread_id: str,
-    logger: Any,
-) -> None:
-    """Warn when an extracted fact's content is not grounded in the new user turns.
-
-    Catches two known LLM failure modes that previously corrupted the fact store:
-
-    1. **Synthesis from existing facts** - the LLM emits an ADD whose content
-       paraphrase-merges two or more existing facts (e.g. existing
-       "user eats meat" + "user loves steak" → emitted "user loves steak,
-       indicating they eat meat") even though the new user turn says nothing
-       on the topic. Reconciliation later catches the resulting duplicates
-       but the visible artefact is a chain of "duplicate" supersedes that the
-       user never triggered.
-
-    2. **Phantom explicit-negation** - the LLM emits a second CONTRADICT fact
-       alongside the literal user statement (e.g. user says "I love steak and
-       seafood"; LLM emits both "user loves steak and seafood" and an invented
-       "user eats meat" CONTRADICT) when the supersedes_id on the literal fact
-       would have sufficed. Pollutes the store with claims the user didn't make.
-
-    Heuristic: tokenize each emitted fact's content into lowercased content
-    words; subtract tokens present in the new user-turn transcript; the
-    remainder is "ungrounded". If ungrounded tokens come from 2+ existing
-    facts → strong synthesis signal. If they come from a single existing
-    fact with >=50%% overlap → weaker phantom-negation signal.
-
-    Logs a WARNING for each suspected fact. Does NOT drop facts - downstream
-    reconciliation remains the dedup authority - but the WARNING is the
-    deterministic test signal that catches regressions.
-    """
-    if not fact_docs or not turn_items:
-        return
-
-    user_turn_text = " ".join(
-        str(m.get("content") or "") for m in turn_items if (m.get("role") or "").lower() == "user"
-    )
-    user_tokens = _grounding_tokens(user_turn_text)
-
-    existing_with_tokens: list[tuple[str, set[str]]] = []
-    for mem in existing_facts:
-        toks = _grounding_tokens(str(mem.get("content") or ""))
-        if toks:
-            existing_with_tokens.append((str(mem.get("id") or ""), toks))
-
-    for doc in fact_docs:
-        content = str(doc.get("content") or "")
-        fact_tokens = _grounding_tokens(content)
-        if not fact_tokens:
-            continue
-
-        ungrounded = fact_tokens - user_tokens
-        if not ungrounded:
-            continue
-
-        contributors: list[tuple[str, set[str]]] = [
-            (eid, ungrounded & toks) for eid, toks in existing_with_tokens if ungrounded & toks
-        ]
-
-        if len(contributors) >= 2:
-            logger.warning(
-                "extract_memories: emitted fact appears synthesized from %d existing facts "
-                "(ungrounded in user turns) - extract should ground only in this turn's [user] lines. "
-                "doc_id=%s content=%r ungrounded_tokens=%s contributor_ids=%s "
-                "user_id=%s thread_id=%s",
-                len(contributors),
-                doc.get("id"),
-                content,
-                sorted(ungrounded),
-                [eid for eid, _ in contributors],
-                user_id,
-                thread_id,
-            )
-        elif len(contributors) == 1 and len(ungrounded) >= 2:
-            eid, overlap = contributors[0]
-            overlap_ratio = len(overlap) / len(ungrounded)
-            if overlap_ratio >= 0.5:
-                logger.warning(
-                    "extract_memories: emitted fact has ungrounded tokens overlapping a single existing fact "
-                    "(possible phantom-negation/restatement) - extract should ground only in this turn's "
-                    "[user] lines. doc_id=%s content=%r ungrounded_tokens=%s overlap_existing_id=%s "
-                    "overlap_ratio=%.2f user_id=%s thread_id=%s",
-                    doc.get("id"),
-                    content,
-                    sorted(ungrounded),
-                    eid,
-                    overlap_ratio,
-                    user_id,
-                    thread_id,
-                )
-
-
 def parse_llm_json(text: str | None) -> dict[str, Any]:
     """Parse JSON from an LLM response, stripping markdown fences."""
     if text is None:
@@ -618,8 +582,9 @@ def parse_llm_json(text: str | None) -> dict[str, Any]:
     if cleaned.endswith("```"):
         cleaned = cleaned[:-3]
     cleaned = cleaned.strip()
+    decoder = json.JSONDecoder()
     try:
-        obj, end = json.JSONDecoder().raw_decode(cleaned)
+        obj, end = decoder.raw_decode(cleaned)
     except json.JSONDecodeError as exc:
         preview = (text or "")[:200].replace("\n", " ")
         if _looks_truncated(cleaned, exc):
@@ -631,15 +596,85 @@ def parse_llm_json(text: str | None) -> dict[str, Any]:
                 f"recent_k, or split oversized turns). Decode error: {exc}. preview={preview!r}"
             ) from exc
         raise LLMError(f"LLM returned invalid JSON (preview={preview!r}): {exc}") from exc
-    trailing = cleaned[end:].strip()
-    if trailing:
-        logger.warning(
-            "LLM response had %d chars of extra data after the first JSON object; using the "
-            "first object and ignoring the remainder (trailing_preview=%r)",
-            len(trailing),
-            trailing[:120].replace("\n", " "),
+    remainder = cleaned[end:]
+    if not isinstance(obj, dict):
+        # Type contract: this returns a JSON object. Some deployments emit a bare
+        # array or scalar root (e.g. ``[{...}]``); every caller then does
+        # ``parsed.get("facts"/"episodes")``, so returning a non-dict would
+        # surface downstream as an AttributeError that the extraction
+        # error-handlers misclassify as a transient (retryable) failure and defer
+        # forever. Raise a typed LLMError so a malformed root is handled like any
+        # other bad output instead of wedging the segment/batch.
+        preview = (text or "")[:200].replace("\n", " ")
+        raise LLMError(
+            f"LLM returned a non-object JSON root ({type(obj).__name__}); expected a JSON "
+            f"object such as {{'facts': [...]}}. preview={preview!r}"
         )
-    return obj
+    if not remainder.strip():
+        # Fast path: exactly one JSON object, no trailing content (the vast
+        # majority of responses).
+        return obj
+
+    # Some models (notably under strict json_schema on certain deployments) emit
+    # MULTIPLE back-to-back top-level JSON objects for a single call - e.g.
+    # ``{"facts":[...]}{"facts":[...]}``. ``raw_decode`` only returns the first,
+    # so keeping just it would silently DROP every item in the trailing
+    # object(s) - and the batch's turns get stamped ``extracted_at``, so those
+    # facts are never recovered. Instead, decode every top-level object and merge
+    # them: list-valued keys (``facts``, ``events``, ...) are concatenated and any
+    # other/scalar key keeps its first-seen value. Downstream exact-dup hashing
+    # removes any repeats, so merging is always safe.
+    merged: dict[str, Any] = obj
+    object_count = 1
+    pos = end
+    length = len(cleaned)
+    while pos < length:
+        # Skip inter-object whitespace and stray separators between objects.
+        while pos < length and cleaned[pos] in " \t\r\n,":
+            pos += 1
+        if pos >= length:
+            break
+        try:
+            nxt, pos = decoder.raw_decode(cleaned, pos)
+        except json.JSONDecodeError:
+            leftover = cleaned[pos:].strip()
+            logger.warning(
+                "LLM response had %d chars of non-JSON trailing data after %d concatenated "
+                "JSON object(s); merged the objects and ignored the remainder "
+                "(trailing_preview=%r)",
+                len(leftover),
+                object_count,
+                leftover[:120].replace("\n", " "),
+            )
+            break
+        object_count += 1
+        if isinstance(nxt, dict):
+            _merge_json_objects(merged, nxt)
+        # A non-dict follow-on cannot be merged into a dict result; skip it.
+
+    if object_count > 1:
+        logger.info(
+            "LLM response contained %d concatenated JSON objects; merged their list fields into "
+            "one result so no items were dropped.",
+            object_count,
+        )
+    return merged
+
+
+def _merge_json_objects(base: dict[str, Any], extra: dict[str, Any]) -> None:
+    """Merge ``extra`` into ``base`` in place.
+
+    List-valued keys present in both are concatenated (this is what recovers the
+    facts/events an LLM splits across multiple concatenated JSON objects); keys
+    only in ``extra`` are added; any other conflict keeps ``base``'s (first-seen)
+    value. Exact-duplicate items are pruned later by the pipeline's content-hash
+    dedup, so concatenating without de-duping here is safe.
+    """
+    for key, value in extra.items():
+        if key not in base:
+            base[key] = value
+        elif isinstance(base[key], list) and isinstance(value, list):
+            base[key].extend(value)
 
 
 def _looks_truncated(cleaned: str, exc: json.JSONDecodeError) -> bool:
@@ -655,6 +690,26 @@ def default_prompts_dir() -> str:
     """Default ``prompts/`` directory location: under ``azure/cosmos/agent_memory/``."""
     pkg_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(pkg_dir, "prompts")
+
+
+_EXTRACT_MEMORIES_PROMPT_DEFAULT = "extract_memories-v2.prompty"
+_EXTRACT_MEMORIES_PROMPT_ALLOWED = frozenset({"extract_memories.prompty", "extract_memories-v2.prompty"})
+
+
+def extract_memories_prompt_file() -> str:
+    """Return the fact-extraction prompt filename, env-selectable.
+
+    Defaults to the v2 ``extract_memories-v2.prompty`` extractor (higher recall;
+    also captures assistant-provided information: lists, tables, instructions,
+    and researched answers the user may later reference). Set
+    ``AMT_EXTRACT_MEMORIES_PROMPT=extract_memories.prompty`` to fall back to the
+    v1 extractor without touching the default. An unknown value falls back to
+    the v2 default so a typo can never point extraction at an arbitrary or
+    missing prompt file. The chosen filename must be registered in
+    ``PROMPTY_SCHEMAS`` so it still gets the structured-output response format.
+    """
+    name = os.environ.get("AMT_EXTRACT_MEMORIES_PROMPT", _EXTRACT_MEMORIES_PROMPT_DEFAULT)
+    return name if name in _EXTRACT_MEMORIES_PROMPT_ALLOWED else _EXTRACT_MEMORIES_PROMPT_DEFAULT
 
 
 def _read_prompty_version(path: str | Path) -> str:
@@ -695,8 +750,30 @@ class PromptyLoader:
         import prompty
 
         loaded = prompty.load(self._path_for(filename))
+        self._disable_strict_format(prompty, loaded)
         self._cache[filename] = loaded
         return loaded
+
+    def _disable_strict_format(self, prompty: Any, loaded: Any) -> None:
+        """Disable prompty strict nonce parsing for SDK-owned internal prompts."""
+        template = getattr(loaded, "template", None)
+        if template is None:
+            template_type = getattr(prompty, "Template", None)
+            if template_type is None:
+                return
+            template = template_type()
+            loaded.template = template
+
+        format_config = getattr(template, "format", None)
+        if format_config is None:
+            format_type = getattr(prompty, "FormatConfig", None)
+            if format_type is None:
+                return
+            format_config = format_type()
+            template.format = format_config
+
+        if hasattr(format_config, "strict"):
+            format_config.strict = False
 
     def prompt_version(self, filename: str) -> str:
         """Return the ``version:`` declared in the prompty front-matter."""
@@ -715,24 +792,6 @@ class PromptyLoader:
         messages = messages_to_dicts(prompty.prepare(p, inputs=inputs))
         params = extract_prompty_params(p)
         return messages, params
-
-
-# Allowed values for the EpisodicRecord ``outcome_valence`` field - mirrors
-# ``azure.cosmos.agent_memory.models._EPISODIC_ALLOWED_VALENCES`` but kept inline
-# to avoid an import cycle (helpers must not import models).
-VALID_VALENCES = frozenset({"positive", "negative", "neutral", "mixed"})
-
-
-def coerce_valence(value: Any) -> str:
-    """Map an LLM-emitted ``outcome_valence`` to a record-safe value.
-
-    The strict response schema permits ``positive | negative | mixed | neutral
-    | null``; null and any unknown value fall through to ``"neutral"`` so a
-    single drifted episode never aborts the whole extract batch.
-    """
-    if isinstance(value, str) and value in VALID_VALENCES:
-        return value
-    return "neutral"
 
 
 # Per-section caps on the persisted ``structured_summary``. Strict-mode JSON

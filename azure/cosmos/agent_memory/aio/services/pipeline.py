@@ -52,7 +52,6 @@ from azure.cosmos.agent_memory.services._pipeline_helpers import (
     ID_SEED_SEP as _ID_SEED_SEP,
 )
 from azure.cosmos.agent_memory.services._pipeline_helpers import (
-    VALID_VALENCES,
     PromptyLoader,
     _normalize_metadata_keys,
     batch_turns_by_tokens,
@@ -60,10 +59,16 @@ from azure.cosmos.agent_memory.services._pipeline_helpers import (
     build_transcript,
     cap_structured_summary,
     chat_text,
-    check_extracted_fact_grounding,
-    coerce_valence,
+    clamp_unit_interval,
+    created_at_sort_key,
+    deterministic_episode_id,
+    extract_memories_prompt_file,
+    find_episode_boundary,
     is_retryable_llm_error,
+    is_valid_time_pair,
     parse_llm_json,
+    segment_time_bounds,
+    turn_gap_seconds,
 )
 from azure.cosmos.agent_memory.services._pipeline_helpers import (
     is_real_number as _is_real_number,
@@ -75,17 +80,26 @@ from azure.cosmos.agent_memory.store._search_helpers import top_literal
 from azure.cosmos.agent_memory.thresholds import (
     get_dedup_sim_high,
     get_dedup_vector_enabled,
+    get_episode_idle_gap_seconds,
+    get_episode_max_turns,
+    get_episode_min_turns,
+    get_episode_topic_drift,
     get_extraction_batch_max_tokens,
 )
 
 logger = get_logger("azure.cosmos.agent_memory.pipeline.aio")
 
 
-_coerce_valence = coerce_valence
 _cap_structured_summary = cap_structured_summary
 
 _ACTIVE_DOC_FILTER = "(NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
 _PROCEDURAL_MAX_CREATE_ATTEMPTS = 5
+
+# Safety cap on how many episodes one extract_episodes call may close in a
+# single pass (mirror of the sync pipeline). Boundary evaluation runs on a small
+# turn cadence, so this only bounds a pathological drain and never fans out into
+# an unbounded burst of LLM extractions.
+_EPISODE_MAX_SEGMENTS_PER_RUN = 50
 
 
 class _AsyncStoreContainerAdapter:
@@ -464,6 +478,8 @@ class AsyncPipelineService:
             "contradicted_count": 0,
             "exact_dedup_skipped": 0,
             "dropped_episodic_count": 0,
+            "deferred_turn_count": 0,
+            "quarantined_turn_count": 0,
         }
 
     @staticmethod
@@ -487,7 +503,7 @@ class AsyncPipelineService:
     def _parse_llm_json(text: str | None) -> dict[str, Any]:
         return parse_llm_json(text)
 
-    async def extract_memories_dry(
+    async def extract_memories_durable(
         self,
         user_id: str,
         thread_id: str,
@@ -501,7 +517,7 @@ class AsyncPipelineService:
         if not thread_id:
             raise ValidationError("thread_id is required")
 
-        logger.info("extract_memories_dry started user_id=%s thread_id=%s", user_id, thread_id)
+        logger.info("extract_memories_durable started user_id=%s thread_id=%s", user_id, thread_id)
 
         if turns is None:
             query = (
@@ -528,7 +544,7 @@ class AsyncPipelineService:
         items.reverse()
 
         if not items:
-            logger.warning("extract_memories_dry no memories found user_id=%s thread_id=%s", user_id, thread_id)
+            logger.warning("extract_memories_durable no memories found user_id=%s thread_id=%s", user_id, thread_id)
             return {"facts": [], "episodic": [], "updates": [], "processed_turn_docs": []}
 
         existing_for_hash = await self._load_existing_memories(user_id, ["fact"])
@@ -544,19 +560,16 @@ class AsyncPipelineService:
         # *retryable* error are left un-stamped and retried on the next run.
         batches = batch_turns_by_tokens(items, get_extraction_batch_max_tokens())
         facts: list[dict[str, Any]] = []
-        episodic: list[dict[str, Any]] = []
         processed_turns: list[dict[str, Any]] = []
         deferred_turn_count = 0
         quarantined_turn_count = 0
+        extract_prompt = extract_memories_prompt_file()
         for batch in batches:
             batch_transcript = self._build_transcript(batch, include_timestamp=True)
             try:
-                response_text = await self._run_prompty(
-                    "extract_memories.prompty", inputs={"transcript": batch_transcript}
-                )
+                response_text = await self._run_prompty(extract_prompt, inputs={"transcript": batch_transcript})
                 parsed = self._parse_llm_json(response_text)
                 facts.extend(parsed.get("facts", []))
-                episodic.extend(parsed.get("episodic", []))
                 processed_turns.extend(batch)
             except Exception as exc:  # noqa: BLE001
                 if is_retryable_llm_error(exc):
@@ -584,10 +597,8 @@ class AsyncPipelineService:
 
         doc_timestamp = self._stable_source_timestamp(items)
         fact_docs: list[dict[str, Any]] = []
-        episodic_docs: list[dict[str, Any]] = []
         updates: list[dict[str, Any]] = []
         exact_dedup_skipped = 0
-        dropped_episodic_count = 0
 
         for fact in facts:
             text = fact.get("text")
@@ -627,14 +638,14 @@ class AsyncPipelineService:
                 "type": "fact",
                 "content": text,
                 "content_hash": new_content_hash,
-                "confidence": 0.5 if confidence is None else confidence,
-                **self._prompt_lineage("extract_memories.prompty"),
+                "confidence": clamp_unit_interval(confidence, 0.5),
+                **self._prompt_lineage(extract_prompt),
                 "metadata": {
                     "category": fact.get("category") or "other",
                     "temporal_context": fact.get("temporal_context"),
                     "source": fact_source,
                 },
-                "salience": fact.get("salience") if fact.get("salience") is not None else 0.5,
+                "salience": clamp_unit_interval(fact.get("salience"), 0.5),
                 "tags": ["sys:fact", "sys:auto-extracted"] + source_tags + topic_tags,
                 "created_at": doc_timestamp,
                 "updated_at": doc_timestamp,
@@ -643,81 +654,8 @@ class AsyncPipelineService:
             fact_docs.append(self._validate_extracted_doc(doc))
             existing_fact_hashes.add(new_content_hash)
 
-        for ep in episodic:
-            scope_type_raw = ep.get("scope_type")
-            scope_value_raw = ep.get("scope_value")
-            scope_type = scope_type_raw.strip() if isinstance(scope_type_raw, str) else None
-            scope_value = scope_value_raw.strip() if isinstance(scope_value_raw, str) else None
-            if not scope_type or not scope_value:
-                logger.warning(
-                    "extract_memories: dropping malformed episodic (missing scope_type/scope_value) "
-                    "user_id=%s thread_id=%s reason=malformed_scope payload=%r",
-                    user_id,
-                    thread_id,
-                    ep,
-                )
-                dropped_episodic_count += 1
-                continue
-
-            situation = ep.get("situation")
-            action_taken = ep.get("action_taken")
-            outcome = ep.get("outcome")
-            if situation and action_taken and outcome:
-                text = f"{situation} → {action_taken} → {outcome}"
-            else:
-                text = f"For the user's {scope_value} {scope_type}, intent recorded."
-
-            content_hash = compute_content_hash(text)
-            seed = _ID_SEED_SEP.join((user_id, thread_id, content_hash))
-            det_id = f"ep_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
-            topic_tags = build_topic_tags(ep.get("tags", []))
-            confidence = ep.get("confidence")
-            raw_valence = ep.get("outcome_valence")
-            coerced_valence = _coerce_valence(raw_valence)
-            if raw_valence is not None and raw_valence not in VALID_VALENCES:
-                logger.warning(
-                    "extract_memories: coercing unknown outcome_valence=%r → %r user_id=%s thread_id=%s",
-                    raw_valence,
-                    coerced_valence,
-                    user_id,
-                    thread_id,
-                )
-            doc = {
-                "id": det_id,
-                "user_id": user_id,
-                "thread_id": thread_id,
-                "role": "system",
-                "type": "episodic",
-                "content": text,
-                "content_hash": content_hash,
-                "confidence": 0.5 if confidence is None else confidence,
-                "ttl": DEFAULT_TTL_BY_TYPE.get("episodic", 7_776_000),
-                **self._prompt_lineage("extract_memories.prompty"),
-                "metadata": {
-                    "scope_type": scope_type,
-                    "scope_value": scope_value,
-                    "situation": situation,
-                    "action_taken": action_taken,
-                    "outcome": outcome,
-                    "reasoning": ep.get("reasoning"),
-                    "outcome_valence": coerced_valence,
-                    "lesson": ep.get("lesson")
-                    or (
-                        f"{situation} → {action_taken} → {outcome}" if situation and action_taken and outcome else text
-                    ),
-                    "domain": ep.get("domain"),
-                },
-                "salience": ep.get("salience"),
-                "tags": ["sys:episodic", "sys:auto-extracted"] + topic_tags,
-                "created_at": doc_timestamp,
-                "updated_at": doc_timestamp,
-            }
-            episodic_docs.append(self._validate_extracted_doc(doc))
-
         if exact_dedup_skipped:
             updates.append({"op": "stats", "exact_dedup_skipped": exact_dedup_skipped})
-        if dropped_episodic_count:
-            updates.append({"op": "stats", "dropped_episodic_count": dropped_episodic_count})
         if deferred_turn_count or quarantined_turn_count:
             updates.append(
                 {
@@ -727,27 +665,18 @@ class AsyncPipelineService:
                 }
             )
 
-        check_extracted_fact_grounding(
-            fact_docs,
-            processed_turns,
-            existing_for_hash,
-            user_id=user_id,
-            thread_id=thread_id,
-            logger=logger,
-        )
-
         result = {
             "facts": fact_docs,
-            "episodic": episodic_docs,
+            "episodic": [],
             "updates": updates,
             "processed_turn_docs": processed_turns,
         }
         logger.info(
-            "extract_memories_dry completed user_id=%s thread_id=%s fact_docs=%d episodic_docs=%d updates=%d",
+            "extract_memories_durable completed user_id=%s thread_id=%s fact_docs=%d episodic_docs=%d updates=%d",
             user_id,
             thread_id,
             len(fact_docs),
-            len(episodic_docs),
+            0,
             len(updates),
         )
         return result
@@ -973,10 +902,7 @@ class AsyncPipelineService:
             validated = self._validate_extracted_doc(doc)
             doc_type = validated.get("type")
             try:
-                if doc_type == "episodic":
-                    await self._upsert_memory(validated)
-                else:
-                    await self._create_memory(validated)
+                await self._create_memory(validated)
             except CosmosResourceExistsError:
                 logger.info("persist_extracted_memories skipped existing id=%s", validated.get("id"))
                 continue
@@ -990,16 +916,19 @@ class AsyncPipelineService:
             if op.get("op") == "stats":
                 result["exact_dedup_skipped"] += int(op.get("exact_dedup_skipped") or 0)
                 result["dropped_episodic_count"] += int(op.get("dropped_episodic_count") or 0)
-                if "inplace_updated" in op:
-                    result["inplace_updated"] = result.get("inplace_updated", 0) + int(op.get("inplace_updated") or 0)
+                for key in ("inplace_updated", "deferred_turn_count", "quarantined_turn_count"):
+                    if key in op:
+                        result[key] = result.get(key, 0) + int(op.get(key) or 0)
 
         logger.info("persist_extracted_memories completed user_id=%s counts=%s", user_id, result)
 
         return result
 
-    async def _mark_turns_extracted(self, turn_docs: list[dict[str, Any]]) -> int:
-        """Stamp ``extracted_at`` on each turn doc and upsert. Mirror of
-        the sync helper - per-turn failures are logged but never raise.
+    async def _mark_turns_extracted(self, turn_docs: list[dict[str, Any]], *, field: str = "extracted_at") -> int:
+        """Stamp a processed-watermark field on each turn doc and upsert. Mirror of
+        the sync helper - ``field`` selects the independent watermark
+        (``extracted_at`` for facts, ``episode_extracted_at`` for episodic
+        segmentation). Per-turn failures are logged but never raise.
         """
         if not turn_docs:
             return 0
@@ -1011,12 +940,13 @@ class AsyncPipelineService:
                 continue
             try:
                 doc_to_write = dict(turn)
-                doc_to_write["extracted_at"] = now_iso
+                doc_to_write[field] = now_iso
                 await self._upsert_item(self._turns_container, body=doc_to_write)
                 marked += 1
             except Exception as exc:
                 logger.warning(
-                    "_mark_turns_extracted failed for turn_id=%s err=%s (turn may be re-extracted on next call)",
+                    "_mark_turns_extracted(%s) failed for turn_id=%s err=%s (turn may be re-processed on next call)",
+                    field,
                     turn_id,
                     exc,
                 )
@@ -1031,8 +961,8 @@ class AsyncPipelineService:
         turns: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, int]:
         """Extract facts and episodic memories from a thread and persist them."""
-        extracted = await self.extract_memories_dry(user_id, thread_id, recent_k, turns=turns)
-        # Capture the processed turns from the DRY output as the single source of
+        extracted = await self.extract_memories_durable(user_id, thread_id, recent_k, turns=turns)
+        # Capture the processed turns from the compute stage as the single source of
         # truth for stamping. Stamping happens here (not inside persist) so no
         # intermediate transform (e.g. dedup) can drop ``processed_turn_docs``
         # and cause the same turns to be re-extracted forever.
@@ -1059,6 +989,341 @@ class AsyncPipelineService:
                     thread_id,
                 )
         return counts
+
+    async def _load_turn_window(
+        self,
+        user_id: str,
+        thread_id: str,
+        recent_k: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """Load the newest turns for a thread, returned in chronological order."""
+        query = "SELECT * FROM c WHERE c.user_id = @user_id AND c.thread_id = @thread_id AND c.type = 'turn'"
+        items = await self._query_items(
+            self._turns_container,
+            query=query,
+            parameters=[
+                {"name": "@user_id", "value": user_id},
+                {"name": "@thread_id", "value": thread_id},
+            ],
+            partition_key=[user_id, thread_id],
+        )
+        items.sort(key=lambda m: m.get("created_at", ""), reverse=True)
+        if recent_k is not None:
+            items = items[:recent_k]
+        items.reverse()
+        return items
+
+    @staticmethod
+    def _ground_episode_events(
+        events: Any,
+        *,
+        turn_ids: list[str],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """Normalize event source ids to real ids from the current turn window."""
+        valid_turn_ids = set(turn_ids)
+        label_to_id = {f"turn-{i}": turn_id for i, turn_id in enumerate(turn_ids, start=1)}
+        grounded_events: list[dict[str, Any]] = []
+        source_turn_ids: list[str] = []
+        for event in events if isinstance(events, list) else []:
+            if not isinstance(event, dict):
+                continue
+            grounded = dict(event)
+            grounded_sources: list[str] = []
+            for turn_id in event.get("source_turn_ids") or []:
+                source = str(turn_id).strip()
+                mapped = source if source in valid_turn_ids else label_to_id.get(source.lower())
+                if mapped and mapped not in grounded_sources:
+                    grounded_sources.append(mapped)
+                if mapped and mapped not in source_turn_ids:
+                    source_turn_ids.append(mapped)
+            grounded["source_turn_ids"] = grounded_sources
+            grounded_events.append(grounded)
+        return grounded_events, source_turn_ids
+
+    async def _build_episode_docs(
+        self,
+        user_id: str,
+        thread_id: str,
+        items: list[dict[str, Any]],
+        *,
+        segment_key: str,
+    ) -> list[dict[str, Any]]:
+        """Run the episode-extraction prompt over one bounded, already-closed turn
+        segment and return episode docs (no embeddings, no writes).
+
+        Episode ids are DETERMINISTIC from the segment identity (its turn range)
+        plus each episode's ordinal - not the summary text - so a re-run over the
+        same segment collides on id and is skipped rather than duplicated. Mirror
+        of the sync helper.
+        """
+        if not items:
+            return []
+
+        transcript_items: list[dict[str, Any]] = []
+        for index, item in enumerate(items, start=1):
+            turn_id = str(item.get("id") or f"turn-{index}")
+            copied = dict(item)
+            copied["content"] = f"Turn {turn_id}: {item.get('content', '')}"
+            transcript_items.append(copied)
+        transcript = self._build_transcript(transcript_items, include_timestamp=True)
+        response_text = await self._run_prompty("extract_episode.prompty", inputs={"transcript": transcript})
+        parsed = self._parse_llm_json(response_text)
+        episodes = parsed.get("episodes", [])
+        if not isinstance(episodes, list):
+            logger.warning(
+                "_build_episode_docs dropping malformed response user_id=%s thread_id=%s payload=%r",
+                user_id,
+                thread_id,
+                parsed,
+            )
+            return []
+
+        doc_timestamp = self._stable_source_timestamp(items)
+        turn_ids = [str(item.get("id")) for item in items if item.get("id")]
+        segment_started, segment_ended = segment_time_bounds(items)
+
+        episode_docs: list[dict[str, Any]] = []
+        for index, episode in enumerate(episodes):
+            if not isinstance(episode, dict):
+                logger.warning(
+                    "_build_episode_docs dropping malformed episode user_id=%s thread_id=%s payload=%r",
+                    user_id,
+                    thread_id,
+                    episode,
+                )
+                continue
+
+            summary = episode.get("summary")
+            if not isinstance(summary, str) or not summary.strip():
+                logger.warning(
+                    "_build_episode_docs dropping malformed episode (missing summary) "
+                    "user_id=%s thread_id=%s payload=%r",
+                    user_id,
+                    thread_id,
+                    episode,
+                )
+                continue
+
+            title = episode.get("title")
+            if not isinstance(title, str) or not title.strip():
+                logger.warning(
+                    "_build_episode_docs dropping malformed episode (missing title) user_id=%s thread_id=%s payload=%r",
+                    user_id,
+                    thread_id,
+                    episode,
+                )
+                continue
+
+            if not isinstance(episode.get("events"), list):
+                logger.warning(
+                    "_build_episode_docs dropping malformed episode (missing events) "
+                    "user_id=%s thread_id=%s payload=%r",
+                    user_id,
+                    thread_id,
+                    episode,
+                )
+                continue
+
+            content = summary
+            events, source_turn_ids = self._ground_episode_events(episode.get("events"), turn_ids=turn_ids)
+            content_hash = compute_content_hash(content)
+            llm_started, llm_ended = episode.get("started_at"), episode.get("ended_at")
+            # Trust model-supplied times only when they form a valid, self-consistent
+            # ISO pair; otherwise fall back to the grounded segment bounds rather than
+            # dropping the whole episode (malformed or mixed-tz strings are common).
+            if is_valid_time_pair(llm_started, llm_ended):
+                started_at, ended_at = str(llm_started).strip(), str(llm_ended).strip()
+            else:
+                started_at, ended_at = segment_started, segment_ended
+            try:
+                doc = construct_internal(
+                    EpisodicRecord,
+                    {
+                        "id": self._deterministic_episode_id(segment_key, index),
+                        "user_id": user_id,
+                        "thread_id": thread_id,
+                        "role": "system",
+                        "type": "episodic",
+                        "content": content,
+                        "title": title,
+                        "started_at": started_at,
+                        "ended_at": ended_at,
+                        "participants": episode.get("participants") or [],
+                        "events": events,
+                        "outcome": episode.get("outcome"),
+                        "lessons": episode.get("lessons") or [],
+                        "source_turn_ids": source_turn_ids,
+                        "content_hash": content_hash,
+                        "salience": clamp_unit_interval(episode.get("salience"), 0.5),
+                        "confidence": clamp_unit_interval(episode.get("confidence"), 0.5),
+                        "ttl": DEFAULT_TTL_BY_TYPE.get("episodic", 7_776_000),
+                        "tags": ["sys:episodic", "sys:auto-extracted"],
+                        "created_at": doc_timestamp,
+                        "updated_at": doc_timestamp,
+                        **self._prompt_lineage("extract_episode.prompty"),
+                    },
+                ).to_doc()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "_build_episode_docs dropping malformed episode user_id=%s thread_id=%s err=%s payload=%r",
+                    user_id,
+                    thread_id,
+                    exc,
+                    episode,
+                )
+                continue
+            episode_docs.append(doc)
+
+        return episode_docs
+
+    @staticmethod
+    def _deterministic_episode_id(segment_key: str, index: int) -> str:
+        return deterministic_episode_id(segment_key, index)
+
+    async def _load_open_episode_segment(self, user_id: str, thread_id: str) -> list[dict[str, Any]]:
+        """Return the open episode segment: turns not yet folded into an episode,
+        oldest first. Independent ``episode_extracted_at`` watermark (mirror of
+        the sync helper)."""
+        items = await self._query_items(
+            self._turns_container,
+            query=(
+                "SELECT * FROM c WHERE c.user_id = @user_id "
+                "AND c.thread_id = @thread_id AND c.type = 'turn' "
+                "AND (NOT IS_DEFINED(c.episode_extracted_at) OR IS_NULL(c.episode_extracted_at))"
+            ),
+            parameters=[
+                {"name": "@user_id", "value": user_id},
+                {"name": "@thread_id", "value": thread_id},
+            ],
+            partition_key=[user_id, thread_id],
+        )
+        items.sort(key=created_at_sort_key)
+        return items
+
+    async def _episode_segment_embeddings(self, segment: list[dict[str, Any]]) -> list[list[float]]:
+        """One embedding per segment turn for drift detection, or ``[]`` when drift
+        is disabled or embeddings are unavailable (mirror of the sync helper)."""
+        if get_episode_topic_drift() <= 0:
+            return []
+        embeddings: list[Optional[list[float]]] = [
+            turn.get("embedding") if isinstance(turn.get("embedding"), list) else None for turn in segment
+        ]
+        missing = [i for i, emb in enumerate(embeddings) if emb is None]
+        if missing:
+            try:
+                fresh = await self._embed_batch([str(segment[i].get("content") or "") for i in missing])
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("episode drift embedding failed (%s); skipping drift this evaluation", exc)
+                return []
+            for pos, i in enumerate(missing):
+                embeddings[i] = fresh[pos] if pos < len(fresh) else None
+        if any(emb is None for emb in embeddings):
+            return []
+        return [emb for emb in embeddings if emb is not None]
+
+    @staticmethod
+    def _turn_gap_seconds(prev_turn: dict[str, Any], cur_turn: dict[str, Any]) -> Optional[float]:
+        return turn_gap_seconds(prev_turn, cur_turn)
+
+    def _find_episode_boundary(
+        self,
+        segment: list[dict[str, Any]],
+        embeddings: list[list[float]],
+    ) -> Optional[int]:
+        return find_episode_boundary(
+            segment,
+            embeddings,
+            max_turns=get_episode_max_turns(),
+            idle_gap=get_episode_idle_gap_seconds(),
+            drift=get_episode_topic_drift(),
+            min_turns=get_episode_min_turns(),
+        )
+
+    async def extract_episodes(
+        self,
+        user_id: str,
+        thread_id: str,
+        *,
+        flush: bool = False,
+    ) -> dict[str, int]:
+        """Segment the open turn stream into episodes at detected boundaries.
+
+        Mirror of the sync pipeline: the open segment is every turn without an
+        ``episode_extracted_at`` stamp; at each boundary (idle time-gap, topic
+        drift, or max-size cap) the closed segment is extracted, embedded, and
+        persisted, then its turns are stamped. ``flush=True`` drains the trailing
+        open segment. The caller never signals "session end".
+
+        Idempotency is best-effort (not absolute): each episode's id is
+        deterministic in its segment key and ordinal - not the LLM summary text -
+        so re-running the same still-open segment skips the duplicate write (409)
+        while the segment's turn set is stable; a partial watermark-stamp failure
+        can still admit a duplicate, which episodic reconciliation does not fold.
+        """
+        if not user_id:
+            raise ValidationError("user_id is required")
+        if not thread_id:
+            raise ValidationError("thread_id is required")
+
+        segment = await self._load_open_episode_segment(user_id, thread_id)
+        total = 0
+        guard = 0
+        while segment and guard < _EPISODE_MAX_SEGMENTS_PER_RUN:
+            guard += 1
+            embeddings = await self._episode_segment_embeddings(segment)
+            boundary = self._find_episode_boundary(segment, embeddings)
+            if boundary is None:
+                if not flush:
+                    break
+                boundary = len(segment)
+            closing = segment[:boundary]
+            if not closing:
+                break
+            first_id = str(closing[0].get("id") or "")
+            last_id = str(closing[-1].get("id") or "")
+            segment_key = _ID_SEED_SEP.join((user_id, thread_id, first_id, last_id))
+            try:
+                docs = await self._build_episode_docs(user_id, thread_id, closing, segment_key=segment_key)
+                embeddings_for_docs = await self._embed_batch([str(doc["content"]) for doc in docs]) if docs else []
+            except Exception as exc:  # noqa: BLE001
+                if is_retryable_llm_error(exc):
+                    # Transient provider error: leave the segment un-stamped and stop
+                    # this run so it is retried intact next time (mirror of the fact path).
+                    logger.warning(
+                        "extract_episodes: deferring %d turns after retryable extraction error "
+                        "(will retry next run) user_id=%s thread_id=%s err=%s",
+                        len(closing),
+                        user_id,
+                        thread_id,
+                        exc,
+                    )
+                    break
+                # Non-retryable (e.g. content filter, context-length): quarantine the
+                # poison segment - stamp it so it never re-poisons future runs and the
+                # open segment cannot grow without bound - then advance to the next.
+                logger.warning(
+                    "extract_episodes: quarantining %d turns after non-retryable extraction error "
+                    "(marking episode_extracted_at so they do not re-poison future runs) "
+                    "user_id=%s thread_id=%s err=%s",
+                    len(closing),
+                    user_id,
+                    thread_id,
+                    exc,
+                )
+                await self._mark_turns_extracted(closing, field="episode_extracted_at")
+                segment = segment[boundary:]
+                continue
+            for doc, embedding in zip(docs, embeddings_for_docs):
+                doc["embedding"] = embedding
+                validated = self._validate_extracted_doc(doc)
+                try:
+                    await self._create_memory(validated)
+                    total += 1
+                except CosmosResourceExistsError:
+                    logger.info("extract_episodes idempotent skip duplicate episode id=%s", validated.get("id"))
+            await self._mark_turns_extracted(closing, field="episode_extracted_at")
+            segment = segment[boundary:]
+        return {"episodes": total}
 
     async def synthesize_procedural(
         self,
@@ -1131,8 +1396,8 @@ class AsyncPipelineService:
                 "SELECT TOP 50 * FROM c WHERE c.user_id = @uid "
                 "AND c.type = @type "
                 f"AND {_ACTIVE_DOC_FILTER} "
-                "AND IS_DEFINED(c.metadata.lesson) "
-                "AND c.metadata.lesson != null "
+                "AND IS_DEFINED(c.lessons) "
+                "AND ARRAY_LENGTH(c.lessons) > 0 "
                 "ORDER BY c.salience DESC, c.created_at ASC, c.id ASC"
             ),
             parameters=[
@@ -1143,8 +1408,8 @@ class AsyncPipelineService:
         episodic_with_lessons = [
             doc
             for doc in episodic_docs
-            if isinstance(doc.get("metadata", {}).get("lesson"), str)
-            and doc.get("metadata", {}).get("lesson", "").strip()
+            if isinstance(doc.get("lessons"), list)
+            and any(isinstance(lesson, str) and lesson.strip() for lesson in doc.get("lessons", []))
         ]
         source_episodic_ids = [doc["id"] for doc in episodic_with_lessons]
 
@@ -1183,7 +1448,12 @@ class AsyncPipelineService:
         static_prompty_inputs = {
             "behavioral_facts": _render_bullets([doc.get("content", "") for doc in behavioral_fact_docs]),
             "episodic_lessons": _render_bullets(
-                [doc.get("metadata", {}).get("lesson", "") for doc in episodic_with_lessons]
+                [
+                    lesson
+                    for doc in episodic_with_lessons
+                    for lesson in doc.get("lessons", [])
+                    if isinstance(lesson, str) and lesson.strip()
+                ]
             ),
             "user_name": user_name,
         }
@@ -1271,7 +1541,7 @@ class AsyncPipelineService:
         )
         return {"status": "synthesized", "procedural": written_doc}
 
-    async def generate_thread_summary_dry(
+    async def generate_thread_summary_durable(
         self,
         user_id: str,
         thread_id: str,
@@ -1283,7 +1553,7 @@ class AsyncPipelineService:
         if not thread_id:
             raise ValidationError("thread_id is required")
 
-        logger.info("generate_thread_summary_dry started user_id=%s thread_id=%s", user_id, thread_id)
+        logger.info("generate_thread_summary_durable started user_id=%s thread_id=%s", user_id, thread_id)
 
         summary_id = f"summary_{user_id}_{thread_id}"
         existing_summary: Optional[dict[str, Any]] = None
@@ -1314,7 +1584,7 @@ class AsyncPipelineService:
         )
 
         if existing_summary and not items:
-            logger.info("generate_thread_summary_dry no new memories, returning existing")
+            logger.info("generate_thread_summary_durable no new memories, returning existing")
             summary_doc = dict(existing_summary)
             summary_doc.pop("embedding", None)
             return summary_doc
@@ -1403,10 +1673,10 @@ class AsyncPipelineService:
         recent_k: int | None = None,
     ) -> dict[str, Any]:
         """Generate or incrementally update a thread summary and persist it."""
-        summary_doc = await self.generate_thread_summary_dry(user_id, thread_id, recent_k=recent_k)
+        summary_doc = await self.generate_thread_summary_durable(user_id, thread_id, recent_k=recent_k)
         return await self.persist_thread_summary(user_id, thread_id, summary_doc)
 
-    async def generate_user_summary_dry(
+    async def generate_user_summary_durable(
         self,
         user_id: str,
         thread_ids: list[str] | None = None,
@@ -1417,7 +1687,7 @@ class AsyncPipelineService:
             raise ValidationError("user_id is required")
 
         logger.info(
-            "generate_user_summary_dry started user_id=%s observed_thread_ids=%s",
+            "generate_user_summary_durable started user_id=%s observed_thread_ids=%s",
             user_id,
             len(thread_ids) if thread_ids else 0,
         )
@@ -1457,7 +1727,7 @@ class AsyncPipelineService:
         )
 
         if existing_summary and not items:
-            logger.info("generate_user_summary_dry no new memories, returning existing")
+            logger.info("generate_user_summary_durable no new memories, returning existing")
             user_doc = dict(existing_summary)
             user_doc.pop("embedding", None)
             return user_doc
@@ -1563,7 +1833,7 @@ class AsyncPipelineService:
         recent_k: int | None = None,
     ) -> dict[str, Any]:
         """Generate or incrementally update a user summary and persist it."""
-        summary_doc = await self.generate_user_summary_dry(user_id, thread_ids=thread_ids, recent_k=recent_k)
+        summary_doc = await self.generate_user_summary_durable(user_id, thread_ids=thread_ids, recent_k=recent_k)
         return await self.persist_user_summary(user_id, summary_doc)
 
     def _emit_reconcile_outcome(

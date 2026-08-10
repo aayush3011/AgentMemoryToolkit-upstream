@@ -105,7 +105,7 @@ jobs:
         env:
           PKG_NAME: ${{ needs.build.outputs.pkg-name }}
           VERSION: ${{ needs.build.outputs.version }}
-        # Two-pass retry — TestPyPI mirror propagation can lag by a few seconds.
+        # Two-pass retry - TestPyPI mirror propagation can lag by a few seconds.
         # Primary index is real PyPI so all the dependencies resolve normally;
         # the just-published preview only lives on TestPyPI.
         run: |
@@ -164,7 +164,7 @@ jobs:
           packages-dir: dist/
           verbose: true
           print-hash: true
-          # Attestations default-on in v1.11.0+ — opt out until configured.
+          # Attestations default-on in v1.11.0+ - opt out until configured.
           attestations: false
 
   mark-release:

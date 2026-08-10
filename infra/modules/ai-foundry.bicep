@@ -1,5 +1,5 @@
 // AI Foundry (Cognitive Services kind=AIServices) account + chat + embedding
-// model deployments. Single-file module — no `existing` keyword tricks because
+// model deployments. Single-file module - no `existing` keyword tricks because
 // the account is always created fresh by this template.
 //
 // We use a single Microsoft.CognitiveServices/accounts resource with
@@ -73,7 +73,7 @@ resource account 'Microsoft.CognitiveServices/accounts@2024-10-01' = {
 
 // --- Model deployments ----------------------------------------------------
 //
-// Deployments are serialized via dependsOn — Cognitive Services rejects
+// Deployments are serialized via dependsOn - Cognitive Services rejects
 // concurrent deployment writes on the same account.
 
 resource llmDeployment 'Microsoft.CognitiveServices/accounts/deployments@2024-10-01' = {

@@ -185,6 +185,59 @@ def test_generate_exhausts_retries_on_rate_limit():
         )
 
 
+def _api_status_error(status_code: int, headers: dict[str, str] | None = None):
+    import httpx
+    import openai
+
+    request = httpx.Request("POST", "https://test.openai.azure.com/openai/deployments/test/chat/completions")
+    response = httpx.Response(status_code, headers=headers or {}, request=request)
+    return openai.APIStatusError(message=f"status {status_code}", response=response, body=None)
+
+
+def test_generate_retryable_api_error_honors_retry_after(monkeypatch):
+    client = ChatClient(endpoint="https://test.openai.azure.com", api_key="test-key")
+
+    mock_choice = MagicMock()
+    mock_choice.message.content = "recovered"
+    mock_response = MagicMock(choices=[mock_choice], usage=None)
+    mock_openai_client = MagicMock()
+    mock_openai_client.chat.completions.create.side_effect = [
+        _api_status_error(503, {"retry-after": "30"}),
+        mock_response,
+    ]
+    client._client = mock_openai_client
+    sleeps: list[float] = []
+    monkeypatch.setattr("azure.cosmos.agent_memory.chat.random.random", lambda: 0.0)
+    monkeypatch.setattr("azure.cosmos.agent_memory.chat.time.sleep", sleeps.append)
+
+    result = client.generate([{"role": "user", "content": "test"}], max_retries=2, base_delay=2.0)
+
+    assert result == "recovered"
+    assert sleeps == [30.0]
+
+
+def test_generate_retryable_api_error_falls_back_without_retry_after(monkeypatch):
+    client = ChatClient(endpoint="https://test.openai.azure.com", api_key="test-key")
+
+    mock_choice = MagicMock()
+    mock_choice.message.content = "recovered"
+    mock_response = MagicMock(choices=[mock_choice], usage=None)
+    mock_openai_client = MagicMock()
+    mock_openai_client.chat.completions.create.side_effect = [
+        _api_status_error(503),
+        mock_response,
+    ]
+    client._client = mock_openai_client
+    sleeps: list[float] = []
+    monkeypatch.setattr("azure.cosmos.agent_memory.chat.random.random", lambda: 0.0)
+    monkeypatch.setattr("azure.cosmos.agent_memory.chat.time.sleep", sleeps.append)
+
+    result = client.generate([{"role": "user", "content": "test"}], max_retries=2, base_delay=2.0)
+
+    assert result == "recovered"
+    assert sleeps == [1.6]
+
+
 # ---------------------------------------------------------------------------
 # generate() – non-retryable errors
 # ---------------------------------------------------------------------------

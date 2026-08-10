@@ -56,10 +56,12 @@ def test_loader_prompt_version_is_cached(tmp_path: Path) -> None:
 
 def test_all_shipped_prompts_declare_version() -> None:
     loader = PromptyLoader()
-    # extract_memories bumped to v2 when agent-sourced fact extraction landed;
-    # the rest remain v1. Every shipped prompt must declare *some* version.
+    # extract_memories bumped to v4 when episodic extraction was removed
+    # (facts-only); the rest remain v1. Every shipped prompt must declare
+    # *some* version.
     expected = {
-        "extract_memories.prompty": "v3",
+        "extract_memories.prompty": "v4",
+        "extract_episode.prompty": "v1",
         "dedup.prompty": "v1",
         "summarize.prompty": "v1",
         "summarize_update.prompty": "v1",

@@ -92,6 +92,21 @@ async def test_process_extract_memories_invokes_pipeline_and_filters_to_ints():
 
 
 @pytest.mark.asyncio
+async def test_process_extract_episodes_invokes_pipeline_and_filters_to_ints():
+    pipeline = AsyncMock()
+    pipeline.extract_episodes.return_value = {
+        "episodes": 2,
+        "non_int_field": "skip me",
+    }
+
+    proc = AsyncInProcessProcessor(pipeline=pipeline)
+    result = await proc.process_extract_episodes(user_id="u", thread_id="t")
+
+    pipeline.extract_episodes.assert_called_once_with("u", "t")
+    assert result == {"episodes": 2}
+
+
+@pytest.mark.asyncio
 async def test_process_thread_summary_invokes_pipeline_and_returns_dict():
     pipeline = AsyncMock()
     pipeline.generate_thread_summary.return_value = {"id": "summary-1", "content": "..."}

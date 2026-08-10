@@ -52,7 +52,7 @@ DEDUP_SCHEMA: dict[str, Any] = {
 
 
 # ---------------------------------------------------------------------------
-# extract_memories.prompty - extract facts (user- or agent-sourced) + episodic
+# extract_memories.prompty - extract facts (user- or agent-sourced)
 # ---------------------------------------------------------------------------
 _FACT_ITEM = {
     "type": "object",
@@ -88,49 +88,85 @@ _FACT_ITEM = {
     "additionalProperties": False,
 }
 
-_EPISODIC_ITEM = {
-    "type": "object",
-    "properties": {
-        "scope_type": {"type": "string"},
-        "scope_value": {"type": "string"},
-        "situation": {"type": ["string", "null"]},
-        "action_taken": {"type": ["string", "null"]},
-        "outcome": {"type": ["string", "null"]},
-        "outcome_valence": {
-            "type": ["string", "null"],
-            "enum": ["positive", "negative", "mixed", "neutral", None],
-        },
-        "reasoning": {"type": ["string", "null"]},
-        "lesson": {"type": ["string", "null"]},
-        "domain": {"type": ["string", "null"]},
-        "confidence": {"type": "number"},
-        "salience": {"type": "number"},
-        "tags": {"type": "array", "items": {"type": "string"}},
-    },
-    "required": [
-        "scope_type",
-        "scope_value",
-        "situation",
-        "action_taken",
-        "outcome",
-        "outcome_valence",
-        "reasoning",
-        "lesson",
-        "domain",
-        "confidence",
-        "salience",
-        "tags",
-    ],
-    "additionalProperties": False,
-}
-
 EXTRACT_MEMORIES_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "facts": {"type": "array", "items": _FACT_ITEM},
-        "episodic": {"type": "array", "items": _EPISODIC_ITEM},
     },
-    "required": ["facts", "episodic"],
+    "required": ["facts"],
+    "additionalProperties": False,
+}
+
+
+# ---------------------------------------------------------------------------
+# extract_episode.prompty - extract bounded episodic experience records
+# ---------------------------------------------------------------------------
+_EPISODE_EVENT = {
+    "type": "object",
+    "properties": {
+        "sequence": {"type": "integer"},
+        "description": {"type": "string"},
+        "occurred_at": {"type": ["string", "null"]},
+        "source_turn_ids": {"type": "array", "items": {"type": "string"}},
+    },
+    "required": ["sequence", "description", "occurred_at", "source_turn_ids"],
+    "additionalProperties": False,
+}
+
+_EPISODE_OUTCOME = {
+    "type": ["object", "null"],
+    "properties": {
+        "status": {
+            "type": "string",
+            "enum": [
+                "successful",
+                "partially_successful",
+                "failed",
+                "abandoned",
+                "unknown",
+            ],
+        },
+        "description": {"type": "string"},
+    },
+    "required": ["status", "description"],
+    "additionalProperties": False,
+}
+
+_EPISODE_ITEM = {
+    "type": "object",
+    "properties": {
+        "title": {"type": "string"},
+        "summary": {"type": "string"},
+        "started_at": {"type": ["string", "null"]},
+        "ended_at": {"type": ["string", "null"]},
+        "participants": {"type": "array", "items": {"type": "string"}},
+        "events": {"type": "array", "items": _EPISODE_EVENT},
+        "outcome": _EPISODE_OUTCOME,
+        "lessons": {"type": "array", "items": {"type": "string"}},
+        "salience": {"type": "number"},
+        "confidence": {"type": "number"},
+    },
+    "required": [
+        "title",
+        "summary",
+        "started_at",
+        "ended_at",
+        "participants",
+        "events",
+        "outcome",
+        "lessons",
+        "salience",
+        "confidence",
+    ],
+    "additionalProperties": False,
+}
+
+EXTRACT_EPISODE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "episodes": {"type": "array", "items": _EPISODE_ITEM},
+    },
+    "required": ["episodes"],
     "additionalProperties": False,
 }
 
@@ -244,7 +280,9 @@ SYNTHESIZE_PROCEDURAL_SCHEMA: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 PROMPTY_SCHEMAS: dict[str, tuple[str, dict[str, Any]]] = {
     "dedup.prompty": ("DedupOutput", DEDUP_SCHEMA),
+    "extract_episode.prompty": ("ExtractEpisodesOutput", EXTRACT_EPISODE_SCHEMA),
     "extract_memories.prompty": ("ExtractMemoriesOutput", EXTRACT_MEMORIES_SCHEMA),
+    "extract_memories-v2.prompty": ("ExtractMemoriesOutput", EXTRACT_MEMORIES_SCHEMA),
     "summarize.prompty": ("SummarizeOutput", SUMMARIZE_SCHEMA),
     "summarize_update.prompty": ("SummarizeUpdateOutput", SUMMARIZE_UPDATE_SCHEMA),
     "user_summary.prompty": ("UserSummaryOutput", USER_SUMMARY_SCHEMA),

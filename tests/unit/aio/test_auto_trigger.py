@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
+from azure.cosmos.agent_memory.aio.auto_trigger import maybe_trigger_steps
 from azure.cosmos.agent_memory.aio.cosmos_memory_client import AsyncCosmosMemoryClient
 from azure.cosmos.agent_memory.aio.processors import AsyncInProcessProcessor
 
@@ -56,6 +57,7 @@ class TestAsyncAutoTriggerNonBlocking:
     async def test_push_to_cosmos_does_not_await_auto_trigger(self, monkeypatch):
         monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
         monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
+        monkeypatch.setenv("EPISODE_EVAL_EVERY_N", "0")
         monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
 
         processor = AsyncInProcessProcessor(pipeline=MagicMock())
@@ -100,11 +102,82 @@ class TestAsyncAutoTriggerNonBlocking:
 
 class TestAsyncExtractRecentK:
     @pytest.mark.asyncio
+    async def test_episode_zero_does_not_fire(self):
+        processor = AsyncInProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_episodes = AsyncMock()
+        counter_container = _AsyncFakeCounterContainer()
+
+        await maybe_trigger_steps(
+            processor,
+            counter_container,
+            {("u1", "t1"): 1},
+            thresholds={
+                "FACT_EXTRACTION_EVERY_N": 0,
+                "THREAD_SUMMARY_EVERY_N": 0,
+                "EPISODE_EVAL_EVERY_N": 0,
+                "USER_SUMMARY_EVERY_N": 0,
+                "MEMORY_PROCESSOR_OWNER": "inprocess",
+            },
+        )
+
+        processor.process_extract_episodes.assert_not_awaited()
+        assert counter_container.store == {}
+
+    @pytest.mark.asyncio
+    async def test_episode_fires_when_threshold_crossed(self):
+        processor = AsyncInProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_episodes = AsyncMock(return_value={})
+        counter_container = _AsyncFakeCounterContainer()
+        thresholds = {
+            "FACT_EXTRACTION_EVERY_N": 0,
+            "THREAD_SUMMARY_EVERY_N": 0,
+            "EPISODE_EVAL_EVERY_N": 3,
+            "USER_SUMMARY_EVERY_N": 0,
+            "MEMORY_PROCESSOR_OWNER": "inprocess",
+        }
+
+        await maybe_trigger_steps(processor, counter_container, {("u1", "t1"): 2}, thresholds=thresholds)
+        processor.process_extract_episodes.assert_not_awaited()
+
+        await maybe_trigger_steps(processor, counter_container, {("u1", "t1"): 1}, thresholds=thresholds)
+
+        processor.process_extract_episodes.assert_awaited_once_with(user_id="u1", thread_id="t1")
+
+    @pytest.mark.asyncio
+    async def test_episode_failure_is_caught_and_other_steps_continue(self):
+        processor = AsyncInProcessProcessor(pipeline=MagicMock())
+        processor.process_extract_episodes = AsyncMock(side_effect=RuntimeError("episode boom"))
+        processor.process_thread_summary = AsyncMock(return_value={})
+        counter_container = _AsyncFakeCounterContainer()
+
+        with patch(
+            "azure.cosmos.agent_memory._counters.stamp_failure_async",
+            new=AsyncMock(),
+        ) as stamp:
+            await maybe_trigger_steps(
+                processor,
+                counter_container,
+                {("u1", "t1"): 1},
+                thresholds={
+                    "FACT_EXTRACTION_EVERY_N": 0,
+                    "THREAD_SUMMARY_EVERY_N": 1,
+                    "EPISODE_EVAL_EVERY_N": 1,
+                    "USER_SUMMARY_EVERY_N": 0,
+                    "MEMORY_PROCESSOR_OWNER": "inprocess",
+                },
+            )
+
+        processor.process_extract_episodes.assert_awaited_once_with(user_id="u1", thread_id="t1")
+        processor.process_thread_summary.assert_awaited_once_with(user_id="u1", thread_id="t1")
+        stamp.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_extract_fires_without_recent_k_or_watermark(self, monkeypatch):
         """Async: extraction covers all un-extracted turns (extracted_at gated) and
         batches internally, so it fires with NO recent_k and NO success watermark."""
         monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
         monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
+        monkeypatch.setenv("EPISODE_EVAL_EVERY_N", "0")
         monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
 
         processor = AsyncInProcessProcessor(pipeline=MagicMock())
@@ -132,6 +205,7 @@ class TestAsyncExtractRecentK:
         """A total async extract failure is recorded via stamp_failure_async."""
         monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
         monkeypatch.setenv("THREAD_SUMMARY_EVERY_N", "0")
+        monkeypatch.setenv("EPISODE_EVAL_EVERY_N", "0")
         monkeypatch.setenv("USER_SUMMARY_EVERY_N", "0")
 
         processor = AsyncInProcessProcessor(pipeline=MagicMock())
@@ -169,6 +243,7 @@ class TestPushToCosmosUnflushedDelta:
     @pytest.mark.asyncio
     async def test_repeat_push_does_not_re_increment(self, monkeypatch):
         monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
+        monkeypatch.setenv("EPISODE_EVAL_EVERY_N", "0")
 
         client = AsyncCosmosMemoryClient(use_default_credential=False)
 
@@ -212,6 +287,7 @@ class TestPushToCosmosUnflushedDelta:
     @pytest.mark.asyncio
     async def test_only_new_adds_count_after_partial_push(self, monkeypatch):
         monkeypatch.setenv("FACT_EXTRACTION_EVERY_N", "1")
+        monkeypatch.setenv("EPISODE_EVAL_EVERY_N", "0")
 
         client = AsyncCosmosMemoryClient(use_default_credential=False)
 

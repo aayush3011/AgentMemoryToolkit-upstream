@@ -36,6 +36,14 @@ class _FullDummy:
     ) -> dict[str, int]:
         return {}
 
+    def process_extract_episodes(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> dict[str, int]:
+        return {}
+
     def process_thread_summary(
         self,
         *,

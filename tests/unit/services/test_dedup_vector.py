@@ -36,16 +36,9 @@ def _doc(mid: str, content: str, memory_type: str = "fact", **extra: Any) -> dic
     tags = extra.pop("tags", [f"sys:{memory_type}"])
     metadata = extra.pop(
         "metadata",
-        {"category": "preference"}
-        if memory_type == "fact"
-        else {
-            "scope_type": "project",
-            "scope_value": "demo",
-            "lesson": content,
-            "outcome_valence": "neutral",
-        },
+        {"category": "preference"} if memory_type == "fact" else {},
     )
-    return {
+    doc = {
         "id": mid,
         "user_id": "u1",
         "thread_id": "t1",
@@ -63,6 +56,13 @@ def _doc(mid: str, content: str, memory_type: str = "fact", **extra: Any) -> dic
         "updated_at": "2025-01-01T00:00:00+00:00",
         **extra,
     }
+    if memory_type == "episodic":
+        doc.setdefault("title", content)
+        doc.setdefault("events", [])
+        doc.setdefault("participants", [])
+        doc.setdefault("lessons", [])
+        doc.setdefault("source_turn_ids", [])
+    return doc
 
 
 def test_vector_distance_function_reads_container_policy() -> None:

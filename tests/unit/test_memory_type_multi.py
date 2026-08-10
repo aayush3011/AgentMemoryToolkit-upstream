@@ -4,8 +4,11 @@ Covers ``_build_memory_query_builder`` and the public read-side methods that
 forward to it: ``search_cosmos``, ``get_memories``, ``get_thread``.
 
 A non-empty list emits ``c.type IN (@memory_type_0, @memory_type_1, ...)``.
-``None`` (default) or an empty list disables the type filter so the call
-returns every memory type.
+``None`` (default) or an empty list disables the type filter at the
+``_build_memory_query_builder`` level. Note ``search_cosmos`` overrides this:
+its base search defaults to facts, and ``episodic`` is folded into the same
+base query only when ``include_episodes=True`` (no separate episodic query),
+so None/empty there resolves to ``["fact"]``.
 """
 
 from __future__ import annotations
@@ -183,8 +186,10 @@ def test_get_thread_does_not_accept_memory_types():
         client.get_thread(thread_id="t1", memory_types=["turn", "thread_summary"])
 
 
-def test_search_cosmos_accepts_list():
-    """search_cosmos must thread a list of memory types through to the WHERE."""
+def test_search_cosmos_threads_non_episodic_types_and_excludes_episodic_without_optin():
+    """search_cosmos threads non-episodic memory types through to the WHERE, and
+    excludes episodic unless include_episodes is set - so episodes join the base
+    query only when explicitly requested."""
     client, container = _connected_client()
     client._embeddings_client = MagicMock()
     client._embeddings_client.generate.return_value = [0.0] * 8
@@ -194,19 +199,49 @@ def test_search_cosmos_accepts_list():
         memory_types=["fact", "procedural", "episodic"],
     )
     query = _captured_query(container)
+    # episodic dropped (no include_episodes) -> only fact + procedural remain.
+    assert "c.type IN (@memory_type_0, @memory_type_1)" in query
+    params = {p["name"]: p["value"] for p in _captured_params(container)}
+    type_values = {v for k, v in params.items() if k.startswith("@memory_type")}
+    assert params.get("@memory_type_0") == "fact"
+    assert params.get("@memory_type_1") == "procedural"
+    assert "episodic" not in type_values
+
+
+def test_search_cosmos_include_episodes_adds_episodic_to_base_query():
+    """include_episodes folds ``episodic`` into the single base query alongside
+    the caller's other non-episodic types (no separate episodic query)."""
+    client, container = _connected_client()
+    client._embeddings_client = MagicMock()
+    client._embeddings_client.generate.return_value = [0.0] * 8
+    client.search_cosmos(
+        search_terms="user preferences",
+        user_id="u1",
+        memory_types=["fact", "procedural"],
+        include_episodes=True,
+    )
+    query = _captured_query(container)
     assert "c.type IN (@memory_type_0, @memory_type_1, @memory_type_2)" in query
+    params = {p["name"]: p["value"] for p in _captured_params(container)}
+    type_values = {v for k, v in params.items() if k.startswith("@memory_type")}
+    assert type_values == {"fact", "procedural", "episodic"}
 
 
-def test_search_cosmos_empty_list_disables_type_filter():
+def test_search_cosmos_empty_or_none_types_default_to_facts_only():
+    """With include_episodes off, the base search is facts-only: empty/None
+    memory_types resolve to a fact type filter, never 'all types' (which would
+    leak episodes into the base result)."""
     client, container = _connected_client()
     client._embeddings_client = MagicMock()
     client._embeddings_client.generate.return_value = [0.0] * 8
     client.search_cosmos(search_terms="x", user_id="u1", memory_types=[])
     query = _captured_query(container)
+    params = {p["name"]: p["value"] for p in _captured_params(container)}
+    type_values = {v for k, v in params.items() if k.startswith("@memory_type")}
     where_clause = query.split("FROM c", 1)[1]
-    assert "c.type =" not in where_clause
-    assert "c.type IN" not in where_clause
-    assert all(not p["name"].startswith("@memory_type") for p in _captured_params(container))
+    assert "c.type" in where_clause
+    assert params.get("@memory_type_0") == "fact"
+    assert "episodic" not in type_values
 
 
 def test_get_memories_default_uses_all_memories_types():

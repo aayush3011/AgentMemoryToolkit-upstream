@@ -12,6 +12,7 @@ The async counterpart lives in :mod:`azure.cosmos.agent_memory.aio.chat` as
 from __future__ import annotations
 
 import os
+import random
 import re
 import time
 from typing import Any
@@ -26,6 +27,8 @@ TOKEN_SCOPE = "https://cognitiveservices.azure.com/.default"
 RETRYABLE_STATUS_CODES = (429, 500, 503)
 DEFAULT_AZURE_OPENAI_API_VERSION = "2024-12-01-preview"
 SAMPLING_PARAMS = ("temperature", "top_p", "frequency_penalty", "presence_penalty")
+MAX_RETRY_AFTER_DELAY = 60.0
+RETRY_AFTER_FLOOR = 0.1
 
 
 def resolve_api_version(explicit: str | None) -> str:
@@ -58,6 +61,35 @@ def unsupported_param(exc: Exception) -> str | None:
         if re.search(pattern, msg):
             return p
     return None
+
+
+def retry_after_delay(exc: Exception) -> float | None:
+    """Return a Retry-After delay from an OpenAI exception, if present."""
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    get_header = getattr(headers, "get", None)
+    if not callable(get_header):
+        return None
+
+    for name, divisor in (("retry-after", 1.0), ("retry-after-ms", 1000.0)):
+        value = get_header(name)
+        if value is None:
+            continue
+        try:
+            delay = float(value) / divisor
+        except (TypeError, ValueError):
+            continue
+        if delay >= 0:
+            return min(max(delay, RETRY_AFTER_FLOOR), MAX_RETRY_AFTER_DELAY)
+    return None
+
+
+def retry_delay(exc: Exception | None, attempt: int, base_delay: float) -> float:
+    """Compute retry delay with Retry-After support and jitter."""
+    header_delay = retry_after_delay(exc) if exc is not None else None
+    if header_delay is not None:
+        return min(header_delay * (1.0 + 0.2 * random.random()), MAX_RETRY_AFTER_DELAY)
+    return base_delay * (2**attempt) * (0.8 + 0.4 * random.random())
 
 
 def extract_content(response: Any, model: str) -> str:
@@ -164,7 +196,7 @@ class ChatClient:
         messages: list[dict[str, str]],
         *,
         response_format: dict | None = None,
-        max_retries: int = 3,
+        max_retries: int = 6,
         base_delay: float = 2.0,
         **extra: Any,
     ) -> str:
@@ -215,7 +247,7 @@ class ChatClient:
                 return extract_content(response, self._model)
             except openai.RateLimitError as exc:
                 if attempt < max_retries - 1:
-                    delay = base_delay * (2**attempt)
+                    delay = retry_delay(exc, attempt, base_delay)
                     logger.warning(
                         "LLM rate-limited (attempt %d/%d), retrying in %.1fs: %s",
                         attempt + 1,
@@ -244,7 +276,7 @@ class ChatClient:
                     unsupported_strips += 1
                     continue
                 if status in RETRYABLE_STATUS_CODES and attempt < max_retries - 1:
-                    delay = base_delay * (2**attempt)
+                    delay = retry_delay(exc, attempt, base_delay)
                     logger.warning(
                         "LLM API error %s (attempt %d/%d), retrying in %.1fs: %s",
                         status,

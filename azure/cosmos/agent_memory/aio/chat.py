@@ -16,6 +16,7 @@ from azure.cosmos.agent_memory.chat import (
     TOKEN_SCOPE,
     extract_content,
     resolve_api_version,
+    retry_delay,
     unsupported_param,
 )
 from azure.cosmos.agent_memory.exceptions import ConfigurationError
@@ -156,7 +157,7 @@ class AsyncChatClient:
         messages: list[dict[str, str]],
         *,
         response_format: dict | None = None,
-        max_retries: int = 3,
+        max_retries: int = 6,
         base_delay: float = 2.0,
         **extra: Any,
     ) -> str:
@@ -205,7 +206,7 @@ class AsyncChatClient:
                 return extract_content(response, self._model)
             except openai.RateLimitError as exc:
                 if attempt < max_retries - 1:
-                    delay = base_delay * (2**attempt)
+                    delay = retry_delay(exc, attempt, base_delay)
                     logger.warning(
                         "LLM rate-limited (attempt %d/%d), retrying in %.1fs: %s",
                         attempt + 1,
@@ -230,7 +231,7 @@ class AsyncChatClient:
                     unsupported_strips += 1
                     continue
                 if status in RETRYABLE_STATUS_CODES and attempt < max_retries - 1:
-                    delay = base_delay * (2**attempt)
+                    delay = retry_delay(exc, attempt, base_delay)
                     logger.warning(
                         "LLM API error %s (attempt %d/%d), retrying in %.1fs: %s",
                         status,
