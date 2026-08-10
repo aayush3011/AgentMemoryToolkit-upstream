@@ -239,3 +239,23 @@ async def test_build_episode_docs_keeps_mixed_tz_llm_times_after_normalization()
     assert len(docs) == 1
     assert docs[0]["started_at"] == "2026-03-09"
     assert docs[0]["ended_at"] == "2026-03-10T09:08:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_build_episode_docs_keeps_padded_timestamps_and_clamps_scores() -> None:
+    # F-A (aio mirror): padded timestamps are stripped-and-kept; out-of-range
+    # salience/confidence are clamped rather than dropping the episode.
+    ep = _episode()
+    ep["started_at"] = " 2025-01-01T00:01:00+00:00"
+    ep["ended_at"] = "2025-01-01T00:02:00+00:00 "
+    ep["salience"] = 1.4
+    ep["confidence"] = -0.2
+    service, _, _ = _service([{"episodes": [ep]}])
+
+    docs = await service._build_episode_docs("u1", "t1", [_turn(1), _turn(2)], segment_key="seg-1")
+
+    assert len(docs) == 1
+    assert docs[0]["started_at"] == "2025-01-01T00:01:00+00:00"
+    assert docs[0]["ended_at"] == "2025-01-01T00:02:00+00:00"
+    assert docs[0]["salience"] == 1.0
+    assert docs[0]["confidence"] == 0.0

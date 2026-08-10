@@ -1011,11 +1011,25 @@ class CosmosMemoryClient(_BaseMemoryClient):
     ) -> dict[str, int]:
         """Segment the thread's open turn stream into episodes at detected boundaries.
 
-        Episodes are created automatically at idle time-gaps, topic shifts, and a
-        max-size cap - you never signal "session end". Pass ``flush=True`` to also
-        drain the trailing open segment (for example at the end of a conversation
-        or benchmark run).
+        Episodes are created at idle time-gaps (detected only once a later turn
+        reveals the gap), topic shifts, and a max-size cap. A focused session
+        shorter than the max-size cap therefore episodizes only lazily - on the
+        next turn after the idle gap - and a one-shot session that never resumes
+        is not episodized at all under the auto path. Pass ``flush=True`` at the
+        end of a conversation (or benchmark run) to drain the trailing open
+        segment immediately; integrators that know when a session ends should
+        call this on session close.
+
+        Only supported when the in-process backend owns processing; when a
+        Durable Function app is the active processor this raises
+        ``NotImplementedError`` so writes are not split away from that backend.
         """
+        processor = self._get_processor()
+        if not isinstance(processor, InProcessProcessor):
+            raise NotImplementedError(
+                "Episode extraction runs in-process; manual invocation via the SDK is not "
+                "supported when the Durable Function app is the active processor."
+            )
         return self._get_pipeline().extract_episodes(user_id, thread_id, flush=flush)
 
     def synthesize_procedural(self, user_id: str, *, force: bool = False) -> dict[str, Any]:

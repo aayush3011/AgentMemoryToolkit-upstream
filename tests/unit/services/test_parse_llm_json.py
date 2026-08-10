@@ -45,6 +45,14 @@ class TestDoubledAndTrailing:
             parse_llm_json(_DOUBLED)
         assert any("concatenated JSON objects" in r.message for r in caplog.records)
 
+    def test_doubled_object_with_nonempty_lists_concatenates(self) -> None:
+        # Discriminating merge test: list fields from BOTH objects are combined,
+        # so a broken (no-op) merge that kept only the first object would fail here.
+        doubled = '{"facts":[{"t":"a"}],"episodic":[]} {"facts":[{"t":"b"}],"episodic":[{"e":"x"}]}'
+        merged = parse_llm_json(doubled)
+        assert merged["facts"] == [{"t": "a"}, {"t": "b"}]
+        assert merged["episodic"] == [{"e": "x"}]
+
     def test_trailing_garbage_emits_warning(self, caplog: pytest.LogCaptureFixture) -> None:
         # A valid object followed by non-JSON garbage is salvaged but warned.
         with caplog.at_level(logging.WARNING, logger=_HELPER_LOGGER):

@@ -213,3 +213,21 @@ def test_idle_gap_below_min_turns_still_flushes_as_one_episode(monkeypatch) -> N
 
     assert result == {"episodes": 1}
     assert _stamped(turns_store) == ["turn-1", "turn-2", "turn-3"]
+
+
+def test_closed_segment_with_no_episode_still_stamps_turns(monkeypatch) -> None:
+    # F-K: a segment that legitimately yields no episode must still stamp its
+    # turns, so re-evaluation does not reprocess the same window forever.
+    monkeypatch.setenv("EPISODE_IDLE_GAP_SECONDS", "120")
+    monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
+    monkeypatch.setenv("EPISODE_MAX_TURNS", "40")
+    # 00:01, 00:02 then a 28-minute gap to 00:30 -> the pre-gap segment closes.
+    turns = [_turn_at(1, 1), _turn_at(2, 2), _turn_at(3, 30)]
+    service, memories, turns_store, _ = _service(turns, responses=[{"episodes": []}])
+
+    result = service.extract_episodes("u1", "t1")
+
+    assert result == {"episodes": 0}
+    assert _episodes(memories) == []
+    # The closed pre-gap turns are still watermarked despite yielding no episode.
+    assert _stamped(turns_store) == ["turn-1", "turn-2"]

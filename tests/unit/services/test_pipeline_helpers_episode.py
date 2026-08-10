@@ -84,3 +84,13 @@ class TestFindEpisodeBoundary:
     def test_max_turns_cap_closes(self) -> None:
         seg = [_turn(i) for i in range(1, 6)]
         assert find_episode_boundary(seg, [], max_turns=3, idle_gap=0, drift=0.0, min_turns=2) == 3
+
+    def test_max_turns_not_floored_when_below_min_turns(self) -> None:
+        # The max-size cap is a hard ceiling and is NOT floored by min_turns.
+        seg = [_turn(i) for i in range(1, 5)]
+        assert find_episode_boundary(seg, [], max_turns=2, idle_gap=0, drift=0.0, min_turns=3) == 2
+
+    def test_earliest_boundary_wins_across_signals(self) -> None:
+        # Idle gap at i=2 vs a max cap at i=3: the earliest boundary (i=2) wins.
+        seg = [_turn(1), _turn(2), _turn(30), _turn(31)]
+        assert find_episode_boundary(seg, [], max_turns=3, idle_gap=120, drift=0.0, min_turns=2) == 2

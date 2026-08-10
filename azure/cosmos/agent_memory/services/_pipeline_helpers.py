@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 from collections import defaultdict
@@ -54,6 +55,23 @@ def is_valid_time_pair(started: Any, ended: Any) -> bool:
     start = parse_iso_datetime(started)
     end = parse_iso_datetime(ended)
     return start is not None and end is not None and start <= end
+
+
+def clamp_unit_interval(value: Any, default: float) -> float:
+    """Clamp a number into ``[0.0, 1.0]``; return ``default`` if it is not a
+    finite number.
+
+    The strict LLM ``json_schema`` constrains the field type (number) but not
+    its range, so salience / confidence can arrive out of range (e.g. 1.4 or
+    -0.2). Normalizing rather than raising keeps the episode instead of dropping
+    it over a slightly-off score.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return default
+    v = float(value)
+    if not math.isfinite(v):
+        return default
+    return max(0.0, min(1.0, v))
 
 
 # ---------------------------------------------------------------------------
@@ -733,22 +751,6 @@ class PromptyLoader:
         messages = messages_to_dicts(prompty.prepare(p, inputs=inputs))
         params = extract_prompty_params(p)
         return messages, params
-
-
-# Legacy valence helpers retained for the async v4 extraction path while that
-# path still accepts old episodic prompt fields.
-VALID_VALENCES = frozenset({"positive", "negative", "neutral", "mixed"})
-
-
-def coerce_valence(value: Any) -> str:
-    """Map a legacy LLM-emitted ``outcome_valence`` to a safe value.
-
-    Null and any unknown value fall through to ``"neutral"`` so a single
-    drifted legacy extraction never aborts the whole batch.
-    """
-    if isinstance(value, str) and value in VALID_VALENCES:
-        return value
-    return "neutral"
 
 
 # Per-section caps on the persisted ``structured_summary``. Strict-mode JSON

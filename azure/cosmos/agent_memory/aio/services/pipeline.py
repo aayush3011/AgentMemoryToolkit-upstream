@@ -59,6 +59,7 @@ from azure.cosmos.agent_memory.services._pipeline_helpers import (
     build_transcript,
     cap_structured_summary,
     chat_text,
+    clamp_unit_interval,
     deterministic_episode_id,
     extract_memories_prompt_file,
     find_episode_boundary,
@@ -1133,7 +1134,7 @@ class AsyncPipelineService:
             # ISO pair; otherwise fall back to the grounded segment bounds rather than
             # dropping the whole episode (malformed or mixed-tz strings are common).
             if is_valid_time_pair(llm_started, llm_ended):
-                started_at, ended_at = llm_started, llm_ended
+                started_at, ended_at = str(llm_started).strip(), str(llm_ended).strip()
             else:
                 started_at, ended_at = segment_started, segment_ended
             try:
@@ -1155,8 +1156,8 @@ class AsyncPipelineService:
                         "lessons": episode.get("lessons") or [],
                         "source_turn_ids": source_turn_ids,
                         "content_hash": content_hash,
-                        "salience": episode.get("salience") if episode.get("salience") is not None else 0.5,
-                        "confidence": episode.get("confidence") if episode.get("confidence") is not None else 0.5,
+                        "salience": clamp_unit_interval(episode.get("salience"), 0.5),
+                        "confidence": clamp_unit_interval(episode.get("confidence"), 0.5),
                         "ttl": DEFAULT_TTL_BY_TYPE.get("episodic", 7_776_000),
                         "tags": ["sys:episodic", "sys:auto-extracted"],
                         "created_at": doc_timestamp,

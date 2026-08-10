@@ -89,7 +89,7 @@ def format_episodic_context(memories: Iterable[dict[str, Any]]) -> str:
         title = memory.get("title") or "Episode"
         outcome = memory.get("outcome") or {}
         status = outcome.get("status", "unknown") if isinstance(outcome, dict) else "unknown"
-        lines.append(f"{i}. [{status}] {title}: {memory['content']}")
+        lines.append(f"{i}. [{status}] {title}: {memory.get('content', '')}")
     return "\n".join(lines)
 
 
