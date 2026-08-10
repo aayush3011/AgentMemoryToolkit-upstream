@@ -179,3 +179,37 @@ def test_deterministic_episode_id_is_stable_and_content_scoped() -> None:
     assert id_a == id_a_again  # same segment + content -> same id (idempotent)
     assert id_a != id_b  # different content -> different id
     assert id_a != id_other_segment  # different segment -> different id
+
+
+def test_idle_gap_below_min_turns_does_not_close_episode(monkeypatch) -> None:
+    # F4: an idle gap that falls below EPISODE_MIN_TURNS must not close a trivial
+    # sub-min (here one-turn) episode; the segment stays open (no flush).
+    monkeypatch.setenv("EPISODE_IDLE_GAP_SECONDS", "120")
+    monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
+    monkeypatch.setenv("EPISODE_MAX_TURNS", "40")
+    monkeypatch.setenv("EPISODE_MIN_TURNS", "2")
+    # Gap between turn-1 (i=0) and turn-2 (i=1); i=1 < min_turns=2 -> not closed.
+    turns = [_turn_at(1, 1), _turn_at(2, 30), _turn_at(3, 31)]
+    service, memories, turns_store, _ = _service(turns)
+
+    result = service.extract_episodes("u1", "t1")
+
+    assert result == {"episodes": 0}
+    assert _episodes(memories) == []
+    assert _stamped(turns_store) == []
+
+
+def test_idle_gap_below_min_turns_still_flushes_as_one_episode(monkeypatch) -> None:
+    # F4: the min-turns floor gates natural boundaries only; an explicit flush
+    # still drains the sub-min trailing segment into a single episode.
+    monkeypatch.setenv("EPISODE_IDLE_GAP_SECONDS", "120")
+    monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
+    monkeypatch.setenv("EPISODE_MAX_TURNS", "40")
+    monkeypatch.setenv("EPISODE_MIN_TURNS", "2")
+    turns = [_turn_at(1, 1), _turn_at(2, 30), _turn_at(3, 31)]
+    service, memories, turns_store, _ = _service(turns)
+
+    result = service.extract_episodes("u1", "t1", flush=True)
+
+    assert result == {"episodes": 1}
+    assert _stamped(turns_store) == ["turn-1", "turn-2", "turn-3"]

@@ -460,6 +460,12 @@ class EpisodicRecord(MemoryRecordBase):
         if self.started_at is not None and self.ended_at is not None:
             started = datetime.fromisoformat(self.started_at.replace("Z", "+00:00"))
             ended = datetime.fromisoformat(self.ended_at.replace("Z", "+00:00"))
+            # Normalize naive values to UTC so a mixed naive/tz-aware pair compares
+            # safely instead of raising TypeError.
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=timezone.utc)
+            if ended.tzinfo is None:
+                ended = ended.replace(tzinfo=timezone.utc)
             if ended < started:
                 raise ValueError("ended_at must not be before started_at")
         return self

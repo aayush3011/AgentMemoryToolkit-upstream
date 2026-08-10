@@ -328,6 +328,27 @@ class TestEpisodicRecord:
                 )
             )
 
+    def test_mixed_naive_and_aware_times_compare_without_typeerror(self):
+        # A naive date + a tz-aware datetime must not raise TypeError; the naive
+        # value is normalized to UTC and the (valid) pair is accepted.
+        rec = EpisodicRecord(
+            **_episodic_kwargs(
+                started_at="2026-03-09",
+                ended_at="2026-03-10T09:08:00+00:00",
+            )
+        )
+        assert rec.started_at == "2026-03-09"
+        assert rec.ended_at == "2026-03-10T09:08:00+00:00"
+
+    def test_mixed_tz_reversed_order_still_rejected(self):
+        with pytest.raises(pydantic.ValidationError, match="ended_at must not be before started_at"):
+            EpisodicRecord(
+                **_episodic_kwargs(
+                    started_at="2026-03-11T00:00:00+00:00",
+                    ended_at="2026-03-10",
+                )
+            )
+
     def test_id_must_start_with_ep_prefix(self):
         with pytest.raises(pydantic.ValidationError, match="id must start with 'ep_'"):
             EpisodicRecord(**_episodic_kwargs(id="bad-id"))

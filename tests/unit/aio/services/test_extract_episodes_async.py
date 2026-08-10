@@ -4,6 +4,7 @@ import logging
 from typing import Any
 
 import pytest
+from azure.cosmos.exceptions import CosmosResourceExistsError
 
 from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
 from tests.unit.services.test_extract_dry import (
@@ -155,3 +156,86 @@ async def test_extract_memories_durable_keeps_episodic_empty_regression_guard() 
 
     assert output["facts"]
     assert output["episodic"] == []
+
+
+class _AsyncIdUniqueStore(_AsyncTrackingStore):
+    """Async store enforcing id-uniqueness on create, like Cosmos (409 on dup)."""
+
+    async def create_item(self, *, body: dict[str, Any]) -> dict[str, Any]:
+        if any(doc.get("id") == body.get("id") for doc in self.docs):
+            raise CosmosResourceExistsError(message="conflict")
+        self.docs.append(dict(body))
+        return dict(body)
+
+
+@pytest.mark.asyncio
+async def test_build_episode_docs_id_stable_across_summary_text() -> None:
+    # F1: identity is segment_key + ordinal, never the LLM prose.
+    service, _, _ = _service(
+        [
+            {"episodes": [_episode(summary="One phrasing of the CI-retry episode.")]},
+            {"episodes": [_episode(summary="A completely different phrasing entirely.")]},
+        ]
+    )
+    first = await service._build_episode_docs("u1", "t1", [_turn(1), _turn(2)], segment_key="seg-1")
+    second = await service._build_episode_docs("u1", "t1", [_turn(1), _turn(2)], segment_key="seg-1")
+
+    assert first[0]["content"] != second[0]["content"]
+    assert first[0]["id"] == second[0]["id"]
+    assert first[0]["content_hash"] != second[0]["content_hash"]
+
+
+@pytest.mark.asyncio
+async def test_extract_episodes_skips_duplicate_when_segment_reprocessed(monkeypatch) -> None:
+    # F1: crash-before-stamp re-run collides on deterministic id -> 409 skip.
+    monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
+    store = _AsyncIdUniqueStore([])
+    turns = _AsyncStore([_turn(1), _turn(2)])
+    service = AsyncPipelineService(
+        store,
+        _AsyncChat(
+            [
+                {"episodes": [_episode(summary="First run prose.")]},
+                {"episodes": [_episode(summary="Second run, different prose.")]},
+            ]
+        ),
+        _AsyncEmbeddings(),
+        containers=_async_containers_for_store(store, turns_store=turns),
+    )
+
+    assert await service.extract_episodes("u1", "t1", flush=True) == {"episodes": 1}
+    for turn in turns.docs:
+        turn.pop("episode_extracted_at", None)
+    assert await service.extract_episodes("u1", "t1", flush=True) == {"episodes": 0}
+    episodic = [doc for doc in store.docs if doc.get("type") == "episodic"]
+    assert len(episodic) == 1
+
+
+@pytest.mark.asyncio
+async def test_build_episode_docs_falls_back_to_segment_times_on_unparseable_llm_times() -> None:
+    # F2: non-ISO model times fall back to grounded segment bounds, not dropped.
+    bad = _episode()
+    bad["started_at"] = "March 9th"
+    bad["ended_at"] = "2025-01-01T00:02:00+00:00"
+    service, _, _ = _service([{"episodes": [bad]}])
+
+    docs = await service._build_episode_docs("u1", "t1", [_turn(1), _turn(2)], segment_key="seg-1")
+
+    assert len(docs) == 1
+    assert docs[0]["started_at"] == "2025-01-01T00:01:00+00:00"
+    assert docs[0]["ended_at"] == "2025-01-01T00:02:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_build_episode_docs_keeps_mixed_tz_llm_times_after_normalization() -> None:
+    # F2: naive-date + tz-aware pair is valid after normalization; episode kept.
+    mixed = _episode()
+    mixed["started_at"] = "2026-03-09"
+    mixed["ended_at"] = "2026-03-10T09:08:00+00:00"
+    service, _, _ = _service([{"episodes": [mixed]}])
+
+    docs = await service._build_episode_docs("u1", "t1", [_turn(1), _turn(2)], segment_key="seg-1")
+
+    assert len(docs) == 1
+    assert docs[0]["started_at"] == "2026-03-09"
+    assert docs[0]["ended_at"] == "2026-03-10T09:08:00+00:00"

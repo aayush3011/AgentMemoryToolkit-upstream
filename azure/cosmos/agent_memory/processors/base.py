@@ -82,6 +82,21 @@ class MemoryProcessor(Protocol):
         recent_k: Optional[int] = None,
     ) -> dict[str, int]: ...
 
+    def process_extract_episodes(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> dict[str, int]:
+        """Segment the open turn stream into episodes at detected boundaries.
+
+        Deferred backends (e.g. the Durable Functions app) that do not yet
+        implement episodic segmentation may no-op (return an empty result) or
+        raise ``NotImplementedError``; the auto-trigger only invokes this on the
+        in-process backend.
+        """
+        ...
+
     def process_thread_summary(
         self,
         *,

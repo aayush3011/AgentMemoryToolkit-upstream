@@ -807,41 +807,15 @@ class AsyncMemoryStore:
         user_id: str,
         thread_id: Optional[str] = None,
         recent_k: Optional[int] = None,
-        *,
-        include_superseded: bool = False,
-        created_after: Optional[str | datetime] = None,
-        created_before: Optional[str | datetime] = None,
-        started_at: Optional[str | datetime] = None,
-        ended_at: Optional[str | datetime] = None,
     ) -> list[dict[str, Any]]:
-        """Retrieve active episodic memories for a user, newest first."""
+        """Retrieve active episodic memories for ``user_id``, newest first."""
         if not user_id:
             raise ValidationError("user_id is required for get_episodes")
-
         qb = _QueryBuilder()
+        qb.add_filter("c.type", "@type", "episodic")
         qb.add_filter("c.user_id", "@user_id", user_id)
         qb.add_filter("c.thread_id", "@thread_id", thread_id)
-        qb.add_filter("c.type", "@type", "episodic")
-        qb.add_time_range(
-            "c.created_at",
-            after=_coerce_datetime_iso(created_after),
-            before=_coerce_datetime_iso(created_before),
-            after_param="@created_after",
-            before_param="@created_before",
-        )
-        qb.add_time_range(
-            "c.started_at",
-            after=_coerce_datetime_iso(started_at),
-            after_param="@started_at",
-        )
-        qb.add_time_range(
-            "c.ended_at",
-            before=_coerce_datetime_iso(ended_at),
-            before_param="@ended_at",
-        )
-        if not include_superseded:
-            qb.add_is_null_or_undefined("c.superseded_by")
-
+        qb.add_is_null_or_undefined("c.superseded_by")
         parameters = qb.get_parameters()
         if recent_k is not None:
             parameters.append({"name": "@recent_k", "value": recent_k})

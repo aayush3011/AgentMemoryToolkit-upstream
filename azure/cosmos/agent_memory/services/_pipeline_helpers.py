@@ -9,18 +9,132 @@ LLM call itself stays on the service.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional
 
 from azure.cosmos.agent_memory._embedding_tokens import count_tokens
+from azure.cosmos.agent_memory._utils import cosine_similarity, vector_centroid
 from azure.cosmos.agent_memory.exceptions import LLMError
 from azure.cosmos.agent_memory.logging import get_logger
 
 logger = get_logger(__name__)
+
+
+def parse_iso_datetime(value: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 string to a tz-aware datetime (UTC assumed for naive
+    values), or return ``None`` if it is missing or unparseable.
+
+    Pure: used to validate/normalize model-supplied episode timestamps without
+    raising, so callers can fall back to grounded segment bounds.
+    """
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        dt = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+def is_valid_time_pair(started: Any, ended: Any) -> bool:
+    """True iff both values parse as ISO-8601 datetimes with ``started <= ended``.
+
+    Naive and tz-aware values are normalized to UTC before comparison, so a
+    mixed pair (e.g. a naive date plus a tz-aware datetime) compares safely
+    instead of raising ``TypeError``.
+    """
+    start = parse_iso_datetime(started)
+    end = parse_iso_datetime(ended)
+    return start is not None and end is not None and start <= end
+
+
+# ---------------------------------------------------------------------------
+# Episode boundary segmentation - pure helpers shared by the sync and aio
+# pipelines. IO-free: functions of their inputs (plus threshold values passed
+# in), so the two pipelines share one implementation instead of hand-mirroring.
+# ---------------------------------------------------------------------------
+
+
+def turn_gap_seconds(prev_turn: dict[str, Any], cur_turn: dict[str, Any]) -> Optional[float]:
+    """Seconds between two consecutive turns' ``created_at``, or None if either
+    timestamp is missing/unparseable (the idle-gap check then abstains)."""
+    prev_ts = parse_iso_datetime(prev_turn.get("created_at"))
+    cur_ts = parse_iso_datetime(cur_turn.get("created_at"))
+    if prev_ts is None or cur_ts is None:
+        return None
+    return (cur_ts - prev_ts).total_seconds()
+
+
+def segment_time_bounds(items: list[dict[str, Any]]) -> tuple[Optional[str], Optional[str]]:
+    """Return (earliest, latest) turn ``created_at`` in a segment, or (None, None).
+
+    Used to ground an episode's started_at/ended_at in its actual turn window
+    when the model omits them - for the conversational benchmarks each turn's
+    created_at carries the session date, so this yields correct temporal spans.
+    """
+    times = sorted(
+        item["created_at"] for item in items if isinstance(item.get("created_at"), str) and item.get("created_at")
+    )
+    if not times:
+        return None, None
+    return times[0], times[-1]
+
+
+def deterministic_episode_id(segment_key: str, index: int) -> str:
+    """Identity from the STABLE segment key plus the episode's ordinal within the
+    segment - never the LLM summary text - so re-running the same un-stamped
+    segment yields the same id and the duplicate write is skipped (409)."""
+    seed = ID_SEED_SEP.join((segment_key, str(index)))
+    return f"ep_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
+
+
+def find_episode_boundary(
+    segment: list[dict[str, Any]],
+    embeddings: list[list[float]],
+    *,
+    max_turns: int,
+    idle_gap: int,
+    drift: float,
+    min_turns: int,
+) -> Optional[int]:
+    """Return the exclusive end index of the earliest episode boundary in the
+    open segment, or ``None`` if the segment is still open.
+
+    Signals, earliest wins: (1) an idle time-gap between two consecutive turns,
+    (2) a topic-drift shift of a new turn away from the segment centroid, and
+    (3) a max-size cap that force-closes an over-long segment. Idle-gap and drift
+    boundaries below ``min_turns`` are suppressed so a lone turn is not emitted as
+    a trivial episode; the max-size cap is a hard ceiling and is not floored.
+    Boundaries are temporal/semantic only; prior episodes are never mutated.
+    """
+    n = len(segment)
+    if n == 0:
+        return None
+    min_turns = max(1, min_turns)
+    has_embeddings = bool(embeddings) and len(embeddings) == n
+    for i in range(1, n):
+        if max_turns > 0 and i >= max_turns:
+            return i
+        if idle_gap > 0 and i >= min_turns:
+            gap = turn_gap_seconds(segment[i - 1], segment[i])
+            if gap is not None and gap > idle_gap:
+                return i
+        if drift > 0 and i >= min_turns and has_embeddings:
+            centroid = vector_centroid(embeddings[:i])
+            if centroid and (1.0 - cosine_similarity(embeddings[i], centroid)) > drift:
+                return i
+    if max_turns > 0 and n >= max_turns:
+        return max_turns
+    return None
+
 
 _NON_RETRYABLE_LLM_MARKERS = (
     "content_filter",

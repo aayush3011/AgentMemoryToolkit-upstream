@@ -49,6 +49,22 @@ class AsyncDurableFunctionProcessor:
         )
         return {}
 
+    async def process_extract_episodes(
+        self,
+        *,
+        user_id: str,
+        thread_id: str,
+    ) -> dict[str, int]:
+        # Episodic segmentation is in-process only; the Durable backend has no
+        # episodic path yet, so this is an explicit no-op (the auto-trigger also
+        # gates episode extraction to the in-process processor).
+        logger.debug(
+            "AsyncDurableFunctionProcessor.process_extract_episodes no-op user_id=%s thread_id=%s",
+            user_id,
+            thread_id,
+        )
+        return {}
+
     async def process_thread_summary(
         self,
         *,

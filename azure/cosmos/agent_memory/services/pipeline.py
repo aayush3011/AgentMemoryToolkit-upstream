@@ -26,10 +26,8 @@ from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory._utils import (
     DEFAULT_TTL_BY_TYPE,
     compute_content_hash,
-    cosine_similarity,
     distance_function_from_container_properties,
     vector_autodrop_supported,
-    vector_centroid,
     vector_order_direction,
     vector_similarity_at_least,
 )
@@ -60,9 +58,14 @@ from azure.cosmos.agent_memory.services._pipeline_helpers import (
     build_transcript,
     cap_structured_summary,
     chat_text,
+    deterministic_episode_id,
     extract_memories_prompt_file,
+    find_episode_boundary,
     is_retryable_llm_error,
+    is_valid_time_pair,
     parse_llm_json,
+    segment_time_bounds,
+    turn_gap_seconds,
 )
 from azure.cosmos.agent_memory.services._pipeline_helpers import (
     is_real_number as _is_real_number,
@@ -95,38 +98,6 @@ _PROCEDURAL_MAX_CREATE_ATTEMPTS = 5
 # first evaluation after a huge unprocessed backlog) so one call cannot fan out
 # into an unbounded burst of LLM extractions.
 _EPISODE_MAX_SEGMENTS_PER_RUN = 50
-
-
-def _parse_turn_timestamp(value: Any) -> Optional[datetime]:
-    """Best-effort parse of a turn ``created_at`` into an aware ``datetime``.
-
-    Returns ``None`` for missing/unparseable values so the idle-gap boundary
-    simply abstains on turns without a usable timestamp rather than raising.
-    """
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-def _segment_time_bounds(items: list[dict[str, Any]]) -> tuple[Optional[str], Optional[str]]:
-    """Return (earliest, latest) turn ``created_at`` in a segment, or (None, None).
-
-    Used to ground an episode's started_at/ended_at in its actual turn window
-    when the model omits them - for the conversational benchmarks each turn's
-    created_at carries the session date, so this yields correct temporal spans.
-    """
-    times = sorted(
-        item["created_at"] for item in items if isinstance(item.get("created_at"), str) and item.get("created_at")
-    )
-    if not times:
-        return None, None
-    return times[0], times[-1]
 
 
 class _StoreContainerAdapter:
@@ -817,9 +788,9 @@ class PipelineService:
         segment and return episode docs (no embeddings, no writes).
 
         Episode ids are DETERMINISTIC from the segment identity (its turn range)
-        plus the episode content hash, so a re-run over the same segment - e.g.
-        after a crash between persist and turn-stamping - collides on id and is
-        skipped rather than duplicated.
+        plus each episode's ordinal - not the summary text - so a re-run over the
+        same segment (e.g. after a crash between persist and turn-stamping)
+        collides on id and is skipped rather than duplicated.
         """
         if not items:
             return []
@@ -844,9 +815,9 @@ class PipelineService:
         # date, so segment bounds give correct started_at/ended_at even when the
         # model omits them. We only trust model-supplied times when it provides a
         # complete, self-consistent pair.
-        segment_started, segment_ended = _segment_time_bounds(items)
+        segment_started, segment_ended = segment_time_bounds(items)
         docs: list[dict[str, Any]] = []
-        for episode in episodes:
+        for index, episode in enumerate(episodes):
             if not isinstance(episode, dict):
                 logger.warning(
                     "_build_episode_docs dropping malformed episode user_id=%s thread_id=%s payload=%r",
@@ -888,7 +859,10 @@ class PipelineService:
             events, source_turn_ids = self._ground_episode_events(episode.get("events"), turn_ids=turn_ids)
             content_hash = compute_content_hash(str(summary))
             llm_started, llm_ended = episode.get("started_at"), episode.get("ended_at")
-            if llm_started and llm_ended:
+            # Trust model-supplied times only when they form a valid, self-consistent
+            # ISO pair; otherwise fall back to the grounded segment bounds rather than
+            # dropping the whole episode (malformed or mixed-tz strings are common).
+            if is_valid_time_pair(llm_started, llm_ended):
                 started_at, ended_at = llm_started, llm_ended
             else:
                 started_at, ended_at = segment_started, segment_ended
@@ -896,7 +870,7 @@ class PipelineService:
                 doc = construct_internal(
                     EpisodicRecord,
                     {
-                        "id": self._deterministic_episode_id(segment_key, content_hash),
+                        "id": self._deterministic_episode_id(segment_key, index),
                         "user_id": user_id,
                         "thread_id": thread_id,
                         "role": "system",
@@ -933,9 +907,8 @@ class PipelineService:
         return docs
 
     @staticmethod
-    def _deterministic_episode_id(segment_key: str, content_hash: str) -> str:
-        seed = _ID_SEED_SEP.join((segment_key, content_hash))
-        return f"ep_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
+    def _deterministic_episode_id(segment_key: str, index: int) -> str:
+        return deterministic_episode_id(segment_key, index)
 
     def _load_open_episode_segment(self, user_id: str, thread_id: str) -> list[dict[str, Any]]:
         """Return the open episode segment: turns not yet folded into an episode,
@@ -993,47 +966,21 @@ class PipelineService:
 
     @staticmethod
     def _turn_gap_seconds(prev_turn: dict[str, Any], cur_turn: dict[str, Any]) -> Optional[float]:
-        prev_ts = _parse_turn_timestamp(prev_turn.get("created_at"))
-        cur_ts = _parse_turn_timestamp(cur_turn.get("created_at"))
-        if prev_ts is None or cur_ts is None:
-            return None
-        return (cur_ts - prev_ts).total_seconds()
+        return turn_gap_seconds(prev_turn, cur_turn)
 
     def _find_episode_boundary(
         self,
         segment: list[dict[str, Any]],
         embeddings: list[list[float]],
     ) -> Optional[int]:
-        """Return the exclusive end index of the earliest episode boundary in the
-        open segment, or ``None`` if the segment is still open.
-
-        Signals, earliest wins: (1) an idle time-gap between two consecutive
-        turns, (2) a topic-drift shift of a new turn away from the segment
-        centroid, and (3) a max-size cap that force-closes an over-long segment.
-        Boundaries are temporal/semantic only; prior episodes are never mutated.
-        """
-        n = len(segment)
-        if n == 0:
-            return None
-        max_turns = threshold_config.get_episode_max_turns()
-        idle_gap = threshold_config.get_episode_idle_gap_seconds()
-        drift = threshold_config.get_episode_topic_drift()
-        min_turns = max(1, threshold_config.get_episode_min_turns())
-        has_embeddings = bool(embeddings) and len(embeddings) == n
-        for i in range(1, n):
-            if max_turns > 0 and i >= max_turns:
-                return i
-            if idle_gap > 0:
-                gap = self._turn_gap_seconds(segment[i - 1], segment[i])
-                if gap is not None and gap > idle_gap:
-                    return i
-            if drift > 0 and i >= min_turns and has_embeddings:
-                centroid = vector_centroid(embeddings[:i])
-                if centroid and (1.0 - cosine_similarity(embeddings[i], centroid)) > drift:
-                    return i
-        if max_turns > 0 and n >= max_turns:
-            return max_turns
-        return None
+        return find_episode_boundary(
+            segment,
+            embeddings,
+            max_turns=threshold_config.get_episode_max_turns(),
+            idle_gap=threshold_config.get_episode_idle_gap_seconds(),
+            drift=threshold_config.get_episode_topic_drift(),
+            min_turns=threshold_config.get_episode_min_turns(),
+        )
 
     def extract_episodes(
         self,
@@ -1053,6 +1000,14 @@ class PipelineService:
         boundary (end of conversation / explicit close); the default leaves the
         current, possibly-incomplete segment open. The caller never signals
         "session end" - boundaries are inferred from the stream itself.
+
+        Idempotency (best-effort, not absolute): each episode's id is
+        deterministic in its segment key and ordinal - not the LLM summary text -
+        so re-running the same still-open segment collides on id and the
+        duplicate write is skipped (409). This holds while the segment's turn set
+        is stable; a partial watermark-stamp failure that shifts the open
+        segment's boundaries can still admit a duplicate, which episodic
+        reconciliation does not currently fold.
         """
         if not user_id:
             raise ValidationError("user_id is required")
@@ -1441,7 +1396,7 @@ class PipelineService:
     ) -> dict[str, int]:
         """Extract facts and episodic memories from a thread and persist them."""
         extracted = self.extract_memories_durable(user_id, thread_id, recent_k, turns=turns)
-        # Capture the processed turns from the DRY output as the single source of
+        # Capture the processed turns from the compute stage as the single source of
         # truth for stamping. Stamping happens here (not inside persist) so no
         # intermediate transform (e.g. dedup) can drop ``processed_turn_docs``
         # and cause the same turns to be re-extracted forever.

@@ -4,6 +4,10 @@ Mirror the function-app side (``function_app/shared/config.py``) so the
 InProcess and Durable backends fire on the same turn boundaries by default.
 Operators override via the documented env vars; both backends read the same
 keys, so a single setting flips both.
+
+Exception: the ``EPISODE_*`` knobs (boundary segmentation cadence and tuning)
+are in-process only - the Durable Functions backend has no episodic path yet,
+so there is no ``function_app/shared/config.py`` mirror for them.
 """
 
 from __future__ import annotations
@@ -43,7 +47,11 @@ DEFAULT_EPISODE_TOPIC_DRIFT = 0.0
 # Hard cap on an open segment: force a boundary so neither an episode nor its
 # extraction prompt grows unbounded during a long single-topic session.
 DEFAULT_EPISODE_MAX_TURNS = 40
-# Minimum turns before a drift signal may close an episode / minimum episode size.
+# Minimum turns before a drift signal may close an episode, and a floor on all
+# natural boundaries: idle-gap and drift boundaries below this many turns are
+# suppressed so a lone turn is not emitted as a trivial episode (an explicit
+# flush still drains a sub-min trailing segment). The max-size cap is a hard
+# ceiling and is not floored.
 DEFAULT_EPISODE_MIN_TURNS = 2
 DEFAULT_USER_SUMMARY_EVERY_N = 20
 # Dedup runs on its own cadence - every Nth extract (NOT every Nth turn),

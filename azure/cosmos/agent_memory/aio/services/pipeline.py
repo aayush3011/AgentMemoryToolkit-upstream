@@ -27,10 +27,8 @@ from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory._utils import (
     DEFAULT_TTL_BY_TYPE,
     compute_content_hash,
-    cosine_similarity,
     distance_function_from_container_properties,
     vector_autodrop_supported,
-    vector_centroid,
     vector_order_direction,
     vector_similarity_at_least,
 )
@@ -61,9 +59,14 @@ from azure.cosmos.agent_memory.services._pipeline_helpers import (
     build_transcript,
     cap_structured_summary,
     chat_text,
+    deterministic_episode_id,
     extract_memories_prompt_file,
+    find_episode_boundary,
     is_retryable_llm_error,
+    is_valid_time_pair,
     parse_llm_json,
+    segment_time_bounds,
+    turn_gap_seconds,
 )
 from azure.cosmos.agent_memory.services._pipeline_helpers import (
     is_real_number as _is_real_number,
@@ -95,35 +98,6 @@ _PROCEDURAL_MAX_CREATE_ATTEMPTS = 5
 # turn cadence, so this only bounds a pathological drain and never fans out into
 # an unbounded burst of LLM extractions.
 _EPISODE_MAX_SEGMENTS_PER_RUN = 50
-
-
-def _parse_turn_timestamp(value: Any) -> Optional[datetime]:
-    """Best-effort parse of a turn ``created_at`` into an aware ``datetime``.
-
-    Returns ``None`` for missing/unparseable values so the idle-gap boundary
-    abstains rather than raising (mirror of the sync helper).
-    """
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed
-
-
-def _segment_time_bounds(items: list[dict[str, Any]]) -> tuple[Optional[str], Optional[str]]:
-    """Return (earliest, latest) turn ``created_at`` in a segment (mirror of the
-    sync helper); grounds an episode's temporal span in its turn window when the
-    model omits started_at/ended_at."""
-    times = sorted(
-        item["created_at"] for item in items if isinstance(item.get("created_at"), str) and item.get("created_at")
-    )
-    if not times:
-        return None, None
-    return times[0], times[-1]
 
 
 class _AsyncStoreContainerAdapter:
@@ -989,7 +963,7 @@ class AsyncPipelineService:
     ) -> dict[str, int]:
         """Extract facts and episodic memories from a thread and persist them."""
         extracted = await self.extract_memories_durable(user_id, thread_id, recent_k, turns=turns)
-        # Capture the processed turns from the DRY output as the single source of
+        # Capture the processed turns from the compute stage as the single source of
         # truth for stamping. Stamping happens here (not inside persist) so no
         # intermediate transform (e.g. dedup) can drop ``processed_turn_docs``
         # and cause the same turns to be re-extracted forever.
@@ -1079,8 +1053,9 @@ class AsyncPipelineService:
         segment and return episode docs (no embeddings, no writes).
 
         Episode ids are DETERMINISTIC from the segment identity (its turn range)
-        plus the episode content hash, so a re-run over the same segment collides
-        on id and is skipped rather than duplicated. Mirror of the sync helper.
+        plus each episode's ordinal - not the summary text - so a re-run over the
+        same segment collides on id and is skipped rather than duplicated. Mirror
+        of the sync helper.
         """
         if not items:
             return []
@@ -1106,10 +1081,10 @@ class AsyncPipelineService:
 
         doc_timestamp = self._stable_source_timestamp(items)
         turn_ids = [str(item.get("id")) for item in items if item.get("id")]
-        segment_started, segment_ended = _segment_time_bounds(items)
+        segment_started, segment_ended = segment_time_bounds(items)
 
         episode_docs: list[dict[str, Any]] = []
-        for episode in episodes:
+        for index, episode in enumerate(episodes):
             if not isinstance(episode, dict):
                 logger.warning(
                     "_build_episode_docs dropping malformed episode user_id=%s thread_id=%s payload=%r",
@@ -1154,7 +1129,10 @@ class AsyncPipelineService:
             events, source_turn_ids = self._ground_episode_events(episode.get("events"), turn_ids=turn_ids)
             content_hash = compute_content_hash(content)
             llm_started, llm_ended = episode.get("started_at"), episode.get("ended_at")
-            if llm_started and llm_ended:
+            # Trust model-supplied times only when they form a valid, self-consistent
+            # ISO pair; otherwise fall back to the grounded segment bounds rather than
+            # dropping the whole episode (malformed or mixed-tz strings are common).
+            if is_valid_time_pair(llm_started, llm_ended):
                 started_at, ended_at = llm_started, llm_ended
             else:
                 started_at, ended_at = segment_started, segment_ended
@@ -1162,7 +1140,7 @@ class AsyncPipelineService:
                 doc = construct_internal(
                     EpisodicRecord,
                     {
-                        "id": self._deterministic_episode_id(segment_key, content_hash),
+                        "id": self._deterministic_episode_id(segment_key, index),
                         "user_id": user_id,
                         "thread_id": thread_id,
                         "role": "system",
@@ -1200,9 +1178,8 @@ class AsyncPipelineService:
         return episode_docs
 
     @staticmethod
-    def _deterministic_episode_id(segment_key: str, content_hash: str) -> str:
-        seed = _ID_SEED_SEP.join((segment_key, content_hash))
-        return f"ep_{hashlib.sha256(seed.encode()).hexdigest()[:32]}"
+    def _deterministic_episode_id(segment_key: str, index: int) -> str:
+        return deterministic_episode_id(segment_key, index)
 
     async def _load_open_episode_segment(self, user_id: str, thread_id: str) -> list[dict[str, Any]]:
         """Return the open episode segment: turns not yet folded into an episode,
@@ -1247,41 +1224,21 @@ class AsyncPipelineService:
 
     @staticmethod
     def _turn_gap_seconds(prev_turn: dict[str, Any], cur_turn: dict[str, Any]) -> Optional[float]:
-        prev_ts = _parse_turn_timestamp(prev_turn.get("created_at"))
-        cur_ts = _parse_turn_timestamp(cur_turn.get("created_at"))
-        if prev_ts is None or cur_ts is None:
-            return None
-        return (cur_ts - prev_ts).total_seconds()
+        return turn_gap_seconds(prev_turn, cur_turn)
 
     def _find_episode_boundary(
         self,
         segment: list[dict[str, Any]],
         embeddings: list[list[float]],
     ) -> Optional[int]:
-        """Earliest episode-boundary index in the open segment, or ``None``. Mirror
-        of the sync helper: idle time-gap OR topic drift OR max-size cap."""
-        n = len(segment)
-        if n == 0:
-            return None
-        max_turns = get_episode_max_turns()
-        idle_gap = get_episode_idle_gap_seconds()
-        drift = get_episode_topic_drift()
-        min_turns = max(1, get_episode_min_turns())
-        has_embeddings = bool(embeddings) and len(embeddings) == n
-        for i in range(1, n):
-            if max_turns > 0 and i >= max_turns:
-                return i
-            if idle_gap > 0:
-                gap = self._turn_gap_seconds(segment[i - 1], segment[i])
-                if gap is not None and gap > idle_gap:
-                    return i
-            if drift > 0 and i >= min_turns and has_embeddings:
-                centroid = vector_centroid(embeddings[:i])
-                if centroid and (1.0 - cosine_similarity(embeddings[i], centroid)) > drift:
-                    return i
-        if max_turns > 0 and n >= max_turns:
-            return max_turns
-        return None
+        return find_episode_boundary(
+            segment,
+            embeddings,
+            max_turns=get_episode_max_turns(),
+            idle_gap=get_episode_idle_gap_seconds(),
+            drift=get_episode_topic_drift(),
+            min_turns=get_episode_min_turns(),
+        )
 
     async def extract_episodes(
         self,
@@ -1297,6 +1254,12 @@ class AsyncPipelineService:
         drift, or max-size cap) the closed segment is extracted, embedded, and
         persisted, then its turns are stamped. ``flush=True`` drains the trailing
         open segment. The caller never signals "session end".
+
+        Idempotency is best-effort (not absolute): each episode's id is
+        deterministic in its segment key and ordinal - not the LLM summary text -
+        so re-running the same still-open segment skips the duplicate write (409)
+        while the segment's turn set is stable; a partial watermark-stamp failure
+        can still admit a duplicate, which episodic reconciliation does not fold.
         """
         if not user_id:
             raise ValidationError("user_id is required")
