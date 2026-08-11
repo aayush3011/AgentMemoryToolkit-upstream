@@ -395,32 +395,6 @@ def vector_order_direction(distance_function: str) -> str:
     return "DESC" if distance_function in _SIMILARITY_DESCENDING_FUNCTIONS else "ASC"
 
 
-def vector_similarity_at_least(score: float, threshold: float, distance_function: str) -> bool:
-    """Return ``True`` when ``score`` meets/exceeds ``threshold`` similarity.
-
-    For cosine/dotproduct (higher = more similar) this is ``score >= threshold``;
-    for euclidean (lower = more similar) it inverts to ``score <= threshold``. The
-    dedup thresholds (``DEDUP_SIM_*``) are calibrated for cosine/dotproduct on
-    normalized embeddings; euclidean gets the correct *direction* but its
-    thresholds would need separate calibration.
-    """
-    if distance_function in _SIMILARITY_DESCENDING_FUNCTIONS:
-        return score >= threshold
-    return score <= threshold
-
-
-def vector_autodrop_supported(distance_function: str) -> bool:
-    """Whether the cosine-calibrated near-exact auto-drop is safe to apply.
-
-    The destructive ``DEDUP_SIM_HIGH`` auto-skip drops a new memory without an
-    LLM check, relying on thresholds (~0.97) calibrated for cosine/dotproduct
-    on normalized embeddings. Euclidean returns an *unbounded distance* (not a
-    [0,1] similarity), so those thresholds mis-fire - auto-drop is disabled for
-    euclidean and the borderline tagging path (LLM-adjudicated) is used instead.
-    """
-    return distance_function != "euclidean"
-
-
 def distance_function_from_container_properties(props: Any, *, default: str = "cosine") -> str:
     """Read the vector embedding's ``distanceFunction`` from container properties.
 
@@ -585,15 +559,9 @@ def _container_policies(
     embedding_data_type: str,
     distance_function: str,
     full_text_language: str,
-    include_salience_composite: bool = True,
     vector_index_type: str = "quantizedFlat",
 ) -> tuple[dict, dict, dict]:
-    """Build the vector, indexing, and full-text policies for container creation.
-
-    ``include_salience_composite`` adds the ``(salience, created_at, id)``
-    composite index required by procedural synthesis on the MEMORIES container.
-    Turns reuse this builder with it disabled (turns are never synthesized).
-    """
+    """Build the vector, indexing, and full-text policies for container creation."""
     vector_embedding_policy = {
         "vectorEmbeddings": [
             {
@@ -615,20 +583,6 @@ def _container_policies(
         "vectorIndexes": [{"path": "/embedding", "type": vector_index_type}],
         "fullTextIndexes": [{"path": "/content"}],
     }
-
-    if include_salience_composite:
-        # Procedural synthesis selects TOP N by (salience DESC, created_at ASC, id ASC).
-        # Cosmos requires a composite index for multi-property ORDER BY; without it the
-        # query returns a non-deterministic 50 of N when many docs share the default
-        # salience (0.5), which makes the source-id short-circuit in synthesize_procedural
-        # thrash and burn LLM calls on every reconcile.
-        indexing_policy["compositeIndexes"] = [
-            [
-                {"path": "/salience", "order": "descending"},
-                {"path": "/created_at", "order": "ascending"},
-                {"path": "/id", "order": "ascending"},
-            ]
-        ]
 
     full_text_policy = {
         "defaultLanguage": full_text_language,

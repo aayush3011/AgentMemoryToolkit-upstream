@@ -26,18 +26,18 @@
 - `get_local(memory_id=None, user_id=None, role=None, memory_types=None) -> list[dict]` - filter local buffered memories.
 - `update_local(memory_id, content=None, role=None, memory_type=None, metadata=None) -> None` - update a local buffered memory.
 - `delete_local(memory_id) -> None` - remove a local buffered memory.
-- `add_cosmos(user_id, role, content, memory_type='turn', metadata=None, thread_id=None, tags=None, ttl=None, salience=None, embedding=None, embed=None) -> str` - upsert one memory to Cosmos and return its id.
+- `upsert_memory(user_id, role, content, memory_type='turn', metadata=None, thread_id=None, tags=None, ttl=None, salience=None, embedding=None, embed=None) -> str` - upsert one memory to Cosmos and return its id.
 - `push_to_cosmos(batch_size=25) -> None` - flush local buffered memories to Cosmos.
 - `get_memories(memory_id=None, user_id=None, thread_id=None, role=None, memory_types=None, recent_k=None, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, min_salience=None, min_confidence=None, created_after=None, created_before=None) -> list[dict]` - retrieve memories from the MEMORIES container. `memory_types` defaults to `["fact", "episodic", "procedural"]` and must be a subset of those three.
 - `update_cosmos(memory_id, *, user_id, thread_id, memory_type, content=None, role=None, metadata=None) -> None` - point-update a memory in the container that holds `memory_type`. The `type` field itself is never mutated.
-- `delete_cosmos(memory_id, *, user_id, thread_id, memory_type) -> None` - delete a memory from the container that holds `memory_type`.
+- `delete_memory(memory_id, *, user_id, thread_id, memory_type) -> None` - delete a memory from the container that holds `memory_type`.
 - `get_thread(thread_id, user_id=None, recent_k=None, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, created_after=None, created_before=None) -> list[dict]` - retrieve turns from the TURNS container oldest-first.
 - `get_thread_summary(user_id, thread_id, recent_k=None) -> list[dict]` - retrieve thread summary documents from the SUMMARIES container for a single `(user_id, thread_id)` partition.
 - `get_user_summary(user_id) -> Optional[dict]` - retrieve the active user-summary document.
 
 ### Retrieval
 
-- `search_cosmos(search_terms, memory_id=None, user_id=None, role=None, memory_types=None, thread_id=None, top_k=5, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, min_salience=None, min_confidence=None, created_after=None, created_before=None) -> list[dict]` - hybrid vector/full-text search memories, falling back to vector-only for all-stopword queries.
+- `search_cosmos(search_terms, memory_id=None, user_id=None, role=None, memory_types=None, thread_id=None, top_k=5, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, min_salience=None, min_confidence=None, created_after=None, created_before=None, include_episodes=False) -> list[dict]` - hybrid vector/full-text search memories, falling back to vector-only for all-stopword queries.
 - `search_turns(search_terms, user_id, thread_id=None, role=None, top_k=5, tags_all=None, tags_any=None, exclude_tags=None, created_after=None, created_before=None) -> list[dict]` - hybrid vector/full-text search the raw conversation log instead of facts/episodic/procedural (requires turn embeddings; see `enable_turn_embeddings`). `user_id` is required so the search is scoped to one partition instead of scanning every user's turns.
 - `get_procedural_prompt(user_id) -> Optional[str]` - read the active procedural prompt.
 - `get_procedural_history(user_id, limit=10) -> list[dict]` - read procedural prompt history.
@@ -46,9 +46,18 @@
 - `build_procedural_context(user_id) -> str` - format procedural context for prompts.
 - `build_episodic_context(user_id, query, top_k=3) -> str` - format relevant episodic context.
 
+Episodic retrieval has two scoping modes. `search_episodic(...)` on the store is
+episode-only and, when called with `thread_id`, hard-filters to that thread.
+`search_cosmos(..., include_episodes=True, thread_id=...)` treats episodic
+memory as user-scoped and can recall episodes from other threads for the same
+user. Use the episode-only surface for thread-local recall; use
+`search_cosmos(include_episodes=True)` when cross-thread episodic recall should
+compete with facts in one ranked result set.
+
 ### Processing
 
 - `extract_memories(user_id, thread_id, recent_k=None) -> dict[str, int]` - extract facts/episodic memories from a thread.
+- `extract_episodes(user_id, thread_id, *, flush=False) -> dict[str, int]` - segment the thread's open turn stream into episodes. Automatic processing uses `flush=False`, so the trailing open segment closes lazily on a later boundary. Call with `flush=True` on session close when the in-process backend owns processing and you need to drain the tail immediately.
 - `synthesize_procedural(user_id, *, force=False) -> dict` - synthesize the procedural prompt.
 - `generate_thread_summary(user_id, thread_id, recent_k=None, **kwargs) -> dict` - generate and persist a thread summary.
 - `generate_user_summary(user_id, thread_ids=None, recent_k=None, **kwargs) -> dict` - generate and persist a user summary.
@@ -80,18 +89,18 @@ Local-buffer methods remain synchronous in-memory operations; Cosmos, retrieval,
 - `get_local(memory_id=None, user_id=None, role=None, memory_types=None) -> list[dict]` - filter local buffered memories.
 - `update_local(memory_id, content=None, role=None, memory_type=None, metadata=None) -> None` - update a local buffered memory.
 - `delete_local(memory_id) -> None` - remove a local buffered memory.
-- `async add_cosmos(user_id, role, content, memory_type='turn', metadata=None, thread_id=None, tags=None, ttl=None, salience=None, embedding=None, embed=None) -> str` - upsert one memory to Cosmos and return its id.
+- `async upsert_memory(user_id, role, content, memory_type='turn', metadata=None, thread_id=None, tags=None, ttl=None, salience=None, embedding=None, embed=None) -> str` - upsert one memory to Cosmos and return its id.
 - `async push_to_cosmos(batch_size=25) -> None` - flush local buffered memories to Cosmos.
 - `async get_memories(memory_id=None, user_id=None, thread_id=None, role=None, memory_types=None, recent_k=None, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, min_salience=None, min_confidence=None, created_after=None, created_before=None) -> list[dict]` - retrieve memories from the MEMORIES container. `memory_types` defaults to `["fact", "episodic", "procedural"]` and must be a subset of those three.
 - `async update_cosmos(memory_id, *, user_id, thread_id, memory_type, content=None, role=None, metadata=None) -> None` - point-update a memory in the container that holds `memory_type`. The `type` field itself is never mutated.
-- `async delete_cosmos(memory_id, *, user_id, thread_id, memory_type) -> None` - delete a memory from the container that holds `memory_type`.
+- `async delete_memory(memory_id, *, user_id, thread_id, memory_type) -> None` - delete a memory from the container that holds `memory_type`.
 - `async get_thread(thread_id, user_id=None, recent_k=None, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, created_after=None, created_before=None) -> list[dict]` - retrieve turns from the TURNS container oldest-first.
 - `async get_thread_summary(user_id, thread_id, recent_k=None) -> list[dict]` - retrieve thread summary documents from the SUMMARIES container for a single `(user_id, thread_id)` partition.
 - `async get_user_summary(user_id) -> Optional[dict]` - retrieve the active user-summary document.
 
 ### Retrieval
 
-- `async search_cosmos(search_terms, memory_id=None, user_id=None, role=None, memory_types=None, thread_id=None, top_k=5, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, min_salience=None, min_confidence=None, created_after=None, created_before=None) -> list[dict]` - hybrid vector/full-text search memories, falling back to vector-only for all-stopword queries.
+- `async search_cosmos(search_terms, memory_id=None, user_id=None, role=None, memory_types=None, thread_id=None, top_k=5, tags_all=None, tags_any=None, exclude_tags=None, include_superseded=False, min_salience=None, min_confidence=None, created_after=None, created_before=None, include_episodes=False) -> list[dict]` - hybrid vector/full-text search memories, falling back to vector-only for all-stopword queries.
 - `async search_turns(search_terms, user_id, thread_id=None, role=None, top_k=5, tags_all=None, tags_any=None, exclude_tags=None, created_after=None, created_before=None) -> list[dict]` - hybrid vector/full-text search the raw conversation log instead of facts/episodic/procedural (requires turn embeddings; see `enable_turn_embeddings`). `user_id` is required so the search is scoped to one partition instead of scanning every user's turns.
 - `async get_procedural_prompt(user_id) -> Optional[str]` - read the active procedural prompt.
 - `async get_procedural_history(user_id, limit=10) -> list[dict]` - read procedural prompt history.
@@ -100,9 +109,15 @@ Local-buffer methods remain synchronous in-memory operations; Cosmos, retrieval,
 - `async build_procedural_context(user_id) -> str` - format procedural context for prompts.
 - `async build_episodic_context(user_id, query, top_k=3) -> str` - format relevant episodic context.
 
+Episodic retrieval has the same scoping behavior as the sync API. The store's
+episode-only `search_episodic(...)` hard-filters to `thread_id` when provided,
+while `search_cosmos(..., include_episodes=True, thread_id=...)` treats episodic
+memory as user-scoped and may return episodes from other threads for that user.
+
 ### Processing
 
 - `async extract_memories(user_id, thread_id, recent_k=None) -> dict[str, int]` - extract facts/episodic memories from a thread.
+- `async extract_episodes(user_id, thread_id, *, flush=False) -> dict[str, int]` - segment the thread's open turn stream into episodes. Automatic processing uses `flush=False`, so call with `flush=True` on session close when the in-process backend owns processing and you need to drain the tail immediately.
 - `async synthesize_procedural(user_id, *, force=False) -> dict` - synthesize the procedural prompt.
 - `async generate_thread_summary(user_id, thread_id, recent_k=None, **kwargs) -> dict` - generate and persist a thread summary.
 - `async generate_user_summary(user_id, thread_ids=None, recent_k=None, **kwargs) -> dict` - generate and persist a user summary.
@@ -124,7 +139,7 @@ Use `validate_topology()` (sync) or `await validate_topology()` (async) after `c
 
 Sync extension protocols live in `azure.cosmos.agent_memory.services`; async variants live in `azure.cosmos.agent_memory.aio.services`.
 
-- `MemoryStoreProtocol` (`azure.cosmos.agent_memory.services`): persistence primitives (`query`, `read_item`, `add_cosmos`, `mark_superseded`) consumed by the pipeline.
+- `MemoryStoreProtocol` (`azure.cosmos.agent_memory.services`): persistence primitives (`query`, `read_item`, `upsert_memory`, `mark_superseded`) consumed by the pipeline.
 
 Concrete service classes are exported from their respective packages:
 

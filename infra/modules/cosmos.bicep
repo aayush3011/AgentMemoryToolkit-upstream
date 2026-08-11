@@ -126,22 +126,6 @@ resource memoriesContainer 'Microsoft.DocumentDB/databaseAccounts/sqlDatabases/c
             path: '/content'
           }
         ]
-        compositeIndexes: [
-          [
-            {
-              path: '/salience'
-              order: 'descending'
-            }
-            {
-              path: '/created_at'
-              order: 'ascending'
-            }
-            {
-              path: '/id'
-              order: 'ascending'
-            }
-          ]
-        ]
       }
       vectorEmbeddingPolicy: {
         vectorEmbeddings: [

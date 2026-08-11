@@ -37,7 +37,7 @@ def main() -> None:
 
     # Add a memory directly to Cosmos. memory_type="turn" skips auto-embedding,
     # which keeps the quickstart runnable without AI Foundry credentials.
-    mem.add_cosmos(user_id="u1", role="user", content="Hello from quickstart!", thread_id="t1")
+    mem.upsert_memory(user_id="u1", role="user", content="Hello from quickstart!", thread_id="t1")
     print("Added memory to Cosmos")
 
     # Retrieve the thread we just wrote to
@@ -61,7 +61,7 @@ def main() -> None:
     print("Pushed local memories to Cosmos")
 
     # Clean up – delete the memories we created
-    mem.delete_cosmos(memory_id=memory_id, user_id="u1", thread_id="t1", memory_type="turn")
+    mem.delete_memory(memory_id=memory_id, user_id="u1", thread_id="t1", memory_type="turn")
     print(f"Deleted memory {memory_id}")
 
     print("\nQuickstart complete!")

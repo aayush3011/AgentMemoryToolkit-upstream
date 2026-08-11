@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory.aio.cosmos_memory_client import AsyncCosmosMemoryClient
 from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
+
+EPISODIC_OPT_IN_WARNING = "Episodic memories requested via memory_types are only returned when include_episodes=True"
 
 
 class AsyncIterator:
@@ -93,6 +96,37 @@ async def test_async_search_cosmos_base_is_facts_only_no_episodes_without_optin(
     assert [doc["content"] for doc in results] == ["fact A", "summary B", "turn D"]
     assert store.search.call_args.kwargs["memory_types"] == ["fact"]
     store.search_episodic.assert_not_awaited()
+
+
+async def test_async_search_cosmos_warns_when_episodic_requested_without_optin(caplog):
+    mem, _ = _connected_client()
+    store = MagicMock()
+    store.search = AsyncMock(return_value=[])
+    mem._get_store = MagicMock(return_value=store)
+    caplog.set_level(logging.WARNING)
+
+    results = await mem.search_cosmos("weather", user_id="u1", memory_types=["episodic"])
+
+    assert results == []
+    assert EPISODIC_OPT_IN_WARNING in caplog.text
+    assert store.search.call_args.kwargs["memory_types"] == ["fact"]
+
+
+async def test_async_search_cosmos_does_not_warn_for_episodic_optin_or_other_types(caplog):
+    mem, _ = _connected_client()
+    store = MagicMock()
+    store.search = AsyncMock(return_value=[])
+    mem._get_store = MagicMock(return_value=store)
+    caplog.set_level(logging.WARNING)
+
+    await mem.search_cosmos("weather", user_id="u1", memory_types=["episodic"], include_episodes=True)
+    assert EPISODIC_OPT_IN_WARNING not in caplog.text
+    assert store.search.call_args.kwargs["memory_types"] == ["episodic"]
+
+    caplog.clear()
+    await mem.search_cosmos("weather", user_id="u1", memory_types=["fact"])
+    assert EPISODIC_OPT_IN_WARNING not in caplog.text
+    assert store.search.call_args.kwargs["memory_types"] == ["fact"]
 
 
 async def test_async_search_cosmos_include_episodes_combines_facts_and_episodes_in_base_query():

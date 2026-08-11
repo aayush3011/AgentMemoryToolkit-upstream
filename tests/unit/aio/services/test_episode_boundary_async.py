@@ -1,4 +1,8 @@
-"""Boundary-based episodic segmentation (async mirror of test_episode_boundary)."""
+"""Boundary-based episodic segmentation (async mirror of test_episode_boundary).
+
+A per-thread ``(created_at, id)`` cursor doc (not a per-turn stamp) advances past
+folded turns, so episodic segmentation writes nothing to the turns container and
+cannot perturb the change-feed cadence counter."""
 
 from __future__ import annotations
 
@@ -64,8 +68,24 @@ def _episodes(store: _AsyncTrackingStore) -> list[dict[str, Any]]:
     return [doc for doc in store.docs if doc.get("type") == "episodic"]
 
 
-def _stamped(turns_store: _AsyncStore) -> list[str]:
-    return sorted(t["id"] for t in turns_store.docs if t.get("episode_extracted_at"))
+def _folded(memories: _AsyncTrackingStore, turns_store: _AsyncStore) -> list[str]:
+    """Turn ids folded into an episode, derived from the per-thread episodic
+    cursor doc (the watermark model advances a single cursor instead of stamping
+    each turn, so nothing is written to the turns container)."""
+    cursor = next((d for d in memories.docs if d.get("type") == "episode_cursor"), None)
+    if cursor is None:
+        return []
+    last_at = str(cursor.get("last_episode_at") or "")
+    last_id = str(cursor.get("last_episode_id") or "")
+    return sorted(
+        str(t.get("id"))
+        for t in turns_store.docs
+        if t.get("type") == "turn"
+        and (
+            (str(t.get("created_at") or "") < last_at)
+            or (str(t.get("created_at") or "") == last_at and str(t.get("id") or "") <= last_id)
+        )
+    )
 
 
 @pytest.mark.asyncio
@@ -79,7 +99,7 @@ async def test_time_gap_closes_prior_episode_and_leaves_tail_open(monkeypatch) -
 
     assert result == {"episodes": 1}
     assert len(_episodes(memories)) == 1
-    assert _stamped(turns_store) == ["turn-1", "turn-2"]
+    assert _folded(memories, turns_store) == ["turn-1", "turn-2"]
 
 
 @pytest.mark.asyncio
@@ -109,7 +129,7 @@ async def test_flush_drains_open_tail(monkeypatch) -> None:
 
     assert flushed == {"episodes": 1}
     assert len(_episodes(memories)) == 2
-    assert _stamped(turns_store) == ["turn-1", "turn-2", "turn-3", "turn-4"]
+    assert _folded(memories, turns_store) == ["turn-1", "turn-2", "turn-3", "turn-4"]
     assert await service.extract_episodes("u1", "t1", flush=True) == {"episodes": 0}
 
 
@@ -124,7 +144,7 @@ async def test_max_turns_forces_a_boundary(monkeypatch) -> None:
     result = await service.extract_episodes("u1", "t1")
 
     assert result == {"episodes": 2}
-    assert _stamped(turns_store) == ["turn-1", "turn-2", "turn-3", "turn-4"]
+    assert _folded(memories, turns_store) == ["turn-1", "turn-2", "turn-3", "turn-4"]
 
 
 @pytest.mark.asyncio
@@ -143,7 +163,7 @@ async def test_topic_drift_closes_episode(monkeypatch) -> None:
     result = await service.extract_episodes("u1", "t1")
 
     assert result == {"episodes": 1}
-    assert _stamped(turns_store) == ["turn-1", "turn-2"]
+    assert _folded(memories, turns_store) == ["turn-1", "turn-2"]
 
 
 @pytest.mark.asyncio
@@ -158,7 +178,7 @@ async def test_no_boundary_keeps_segment_open_without_calling_the_llm(monkeypatc
 
     assert result == {"episodes": 0}
     assert _episodes(memories) == []
-    assert _stamped(turns_store) == []
+    assert _folded(memories, turns_store) == []
     assert chat.calls == 0
 
 
@@ -175,7 +195,7 @@ async def test_idle_gap_below_min_turns_does_not_close_episode(monkeypatch) -> N
 
     assert result == {"episodes": 0}
     assert _episodes(memories) == []
-    assert _stamped(turns_store) == []
+    assert _folded(memories, turns_store) == []
 
 
 @pytest.mark.asyncio
@@ -190,7 +210,7 @@ async def test_idle_gap_below_min_turns_still_flushes_as_one_episode(monkeypatch
     result = await service.extract_episodes("u1", "t1", flush=True)
 
     assert result == {"episodes": 1}
-    assert _stamped(turns_store) == ["turn-1", "turn-2", "turn-3"]
+    assert _folded(memories, turns_store) == ["turn-1", "turn-2", "turn-3"]
 
 
 @pytest.mark.asyncio
@@ -210,7 +230,7 @@ async def test_extract_episodes_defers_segment_on_retryable_error(monkeypatch) -
 
     assert result == {"episodes": 0}
     assert _episodes(memories) == []
-    assert _stamped(turns_store) == []  # un-stamped -> retried next run
+    assert _folded(memories, turns_store) == []  # un-stamped -> retried next run
 
 
 @pytest.mark.asyncio
@@ -230,4 +250,49 @@ async def test_extract_episodes_quarantines_segment_on_non_retryable_error(monke
 
     assert result == {"episodes": 0}
     assert _episodes(memories) == []
-    assert _stamped(turns_store) == ["turn-1", "turn-2"]  # quarantined + advanced
+    assert _folded(memories, turns_store) == ["turn-1", "turn-2"]  # quarantined + advanced
+
+
+@pytest.mark.asyncio
+async def test_advance_episode_cursor_is_monotonic(monkeypatch) -> None:
+    monkeypatch.setenv("EPISODE_IDLE_GAP_SECONDS", "120")
+    monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
+    turns = [_turn_at(1, 1), _turn_at(2, 2), _turn_at(3, 30), _turn_at(4, 31)]
+    service, memories, turns_store, _ = _service(turns)
+
+    await service.extract_episodes("u1", "t1")  # gap closes [turn-1, turn-2] -> cursor at turn-2
+    assert _folded(memories, turns_store) == ["turn-1", "turn-2"]
+
+    # A late, out-of-order concurrent run advancing to an OLDER turn is a no-op.
+    await service._advance_episode_cursor("u1", "t1", _turn_at(1, 1))
+    assert _folded(memories, turns_store) == ["turn-1", "turn-2"]
+
+    # A genuinely newer turn still advances the cursor.
+    await service._advance_episode_cursor("u1", "t1", _turn_at(4, 31))
+    assert _folded(memories, turns_store) == ["turn-1", "turn-2", "turn-3", "turn-4"]
+
+
+@pytest.mark.asyncio
+async def test_episode_cursor_is_per_thread(monkeypatch) -> None:
+    monkeypatch.setenv("EPISODE_IDLE_GAP_SECONDS", "120")
+    monkeypatch.setenv("EPISODE_TOPIC_DRIFT", "0")
+
+    def _t(i: int, minute: int, thread: str) -> dict[str, Any]:
+        return {**_turn_at(i, minute), "thread_id": thread}
+
+    turns = [
+        _t(1, 1, "t1"),
+        _t(2, 2, "t1"),
+        _t(3, 30, "t1"),
+        _t(4, 1, "t2"),
+        _t(5, 2, "t2"),
+        _t(6, 30, "t2"),
+    ]
+    service, memories, turns_store, _ = _service(turns)
+
+    await service.extract_episodes("u1", "t1")  # only thread t1
+
+    cursors = sorted(d["thread_id"] for d in memories.docs if d.get("type") == "episode_cursor")
+    assert cursors == ["t1"]
+    t2_segment = await service._load_open_episode_segment("u1", "t2")
+    assert [t["id"] for t in t2_segment] == ["turn-4", "turn-5", "turn-6"]

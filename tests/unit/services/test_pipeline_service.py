@@ -5,17 +5,10 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from azure.cosmos.exceptions import CosmosResourceExistsError
 
 from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory.services.pipeline import PipelineService, _StoreContainerAdapter
-
-
-@pytest.fixture(autouse=True)
-def _pin_legacy_dedup_paths(monkeypatch):
-    monkeypatch.setattr(
-        "azure.cosmos.agent_memory.thresholds.get_dedup_vector_enabled",
-        lambda: False,
-    )
 
 
 class FakeLLMService:
@@ -92,6 +85,8 @@ class FakeStore:
             docs = [doc for doc in docs if doc.get("metadata", {}).get("category") == params["@category"]]
         if "@predicate" in params:
             docs = [doc for doc in docs if doc.get("metadata", {}).get("predicate") == params["@predicate"]]
+        if "c.status='active'" in sql:
+            docs = [doc for doc in docs if doc.get("status") == "active"]
         if "superseded_by" in sql:
             docs = [doc for doc in docs if not doc.get("superseded_by")]
         if "IS_DEFINED(c.lessons)" in sql:
@@ -118,12 +113,20 @@ class FakeStore:
 
         raise CosmosResourceNotFoundError(message=f"not found: {item_id}")
 
-    def add_cosmos(self, record: dict[str, Any]) -> dict[str, Any]:
+    def upsert_memory(self, record: dict[str, Any]) -> dict[str, Any]:
         body = dict(record)
         self.upserts.append(body)
         self.docs = [doc for doc in self.docs if doc.get("id") != body.get("id")]
         self.docs.append(body)
         return body
+
+    def create_item(self, *, body: dict[str, Any]) -> dict[str, Any]:
+        if any(doc.get("id") == body.get("id") for doc in self.docs):
+            raise CosmosResourceExistsError(message="conflict")
+        created = dict(body)
+        self.upserts.append(created)
+        self.docs.append(created)
+        return created
 
     def mark_superseded(self, old_doc: dict[str, Any], superseder_id: str, *, reason: str) -> bool:
         self.supersede_calls.append((old_doc["id"], superseder_id, reason))
@@ -273,17 +276,43 @@ def test_synthesize_procedural_produces_procedural_memory() -> None:
             },
         ]
     )
-    llm = FakeLLMService([{"system_prompt": "Use concise bullet points."}])
+    llm = FakeLLMService(
+        [
+            {
+                "procedures": [
+                    {
+                        "name": "Concise bullet responses",
+                        "summary": "Use concise bullet points.",
+                        "retrieval_text": "Use concise bullet points.",
+                        "procedure_kind": "behavioral_policy",
+                        "scope_type": "user",
+                        "scope_value": None,
+                        "activation_conditions": [],
+                        "preconditions": [],
+                        "steps": [],
+                        "success_conditions": [],
+                        "failure_conditions": [],
+                        "safety_constraints": [],
+                        "source_kind": "explicit_user_instruction",
+                        "grounded_in": ["fact-1"],
+                        "confidence": 0.8,
+                    }
+                ]
+            }
+        ]
+    )
 
     result = _pipeline(store, llm).synthesize_procedural("u1")
 
     assert result["status"] == "synthesized"
-    proc = result["procedural"]
+    assert result["procedures_created"] >= 1
+    proc = next(doc for doc in store.upserts if doc["type"] == "procedural")
     assert proc["type"] == "procedural"
-    assert proc["content"] == "Use concise bullet points."
+    assert proc["id"].startswith("proc_")
+    assert proc["name"] == "Concise bullet responses"
+    assert proc["status"] == "active"
+    assert proc["retrieval_text"] == "Use concise bullet points."
     assert proc["source_fact_ids"] == ["f1"]
-    assert proc["source_episodic_ids"] == ["e1"]
-    assert store.upserts == [proc]
 
 
 def test_reconcile_memories_returns_contradiction_counts() -> None:
@@ -413,28 +442,46 @@ def test_build_procedural_context_returns_active_procedural() -> None:
     store = FakeStore(
         [
             {
-                "id": "proc_u1_1",
+                "id": "proc_active",
                 "user_id": "u1",
                 "thread_id": "__procedural__",
                 "type": "procedural",
+                "status": "active",
+                "name": "Targeted testing",
+                "summary": "Run targeted tests before reporting success.",
+                "retrieval_text": "tests success",
+                "procedure_kind": "behavioral_policy",
+                "scope_type": "user",
+                "scope_value": None,
+                "priority": 10,
+                "source_authority": "high",
                 "version": 1,
-                "content": "Old prompt",
-                "superseded_by": "proc_u1_2",
             },
             {
-                "id": "proc_u1_2",
+                "id": "proc_candidate",
                 "user_id": "u1",
                 "thread_id": "__procedural__",
                 "type": "procedural",
+                "status": "candidate",
+                "name": "Candidate policy",
+                "summary": "Do not include this candidate procedure.",
+                "retrieval_text": "candidate policy",
+                "procedure_kind": "behavioral_policy",
+                "scope_type": "user",
+                "scope_value": None,
+                "priority": 10,
+                "source_authority": "low",
                 "version": 2,
-                "content": "Active prompt",
             },
         ]
     )
 
     fake = FakeLLMService([])
     result = _pipeline(store, fake).build_procedural_context("u1")
-    assert result == "Active prompt"
+    assert "Targeted testing" in result
+    assert "Run targeted tests before reporting success." in result
+    assert "Candidate policy" not in result
+    assert "Do not include this candidate procedure." not in result
 
 
 def test_build_procedural_context_requires_user_id() -> None:

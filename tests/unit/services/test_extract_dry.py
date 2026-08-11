@@ -5,6 +5,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
 from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService, _AsyncStoreContainerAdapter
@@ -77,8 +78,16 @@ class _Store:
             docs = [doc for doc in docs if doc.get("type") in types]
         if "superseded_by" in sql:
             docs = [doc for doc in docs if not doc.get("superseded_by")]
-        if "episode_extracted_at" in sql:
-            docs = [doc for doc in docs if not doc.get("episode_extracted_at")]
+        if "@last_at" in params:
+            # Episodic open-segment cursor: turns after the (created_at, id) watermark.
+            last_at = params["@last_at"]
+            last_id = params.get("@last_id", "")
+            docs = [
+                doc
+                for doc in docs
+                if (str(doc.get("created_at") or "") > last_at)
+                or (str(doc.get("created_at") or "") == last_at and str(doc.get("id") or "") > last_id)
+            ]
         elif "extracted_at" in sql:
             docs = [doc for doc in docs if not doc.get("extracted_at")]
         return docs
@@ -98,9 +107,9 @@ class _Store:
         for doc in self.docs:
             if doc.get("id") == item_id:
                 return dict(doc)
-        raise KeyError(item_id)
+        raise CosmosResourceNotFoundError(message=item_id)
 
-    def add_cosmos(self, record: dict[str, Any]) -> dict[str, Any]:
+    def upsert_memory(self, record: dict[str, Any]) -> dict[str, Any]:
         self.docs.append(dict(record))
         return record
 
@@ -136,8 +145,8 @@ class _AsyncStore(_Store):
     async def read_item(self, item_id: str, partition_key: Any):
         return super().read_item(item_id, partition_key)
 
-    async def add_cosmos(self, record: dict[str, Any]) -> dict[str, Any]:
-        return super().add_cosmos(record)
+    async def upsert_memory(self, record: dict[str, Any]) -> dict[str, Any]:
+        return super().upsert_memory(record)
 
     async def mark_superseded(self, old_doc: dict[str, Any], superseder_id: str, *, reason: str) -> bool:
         return super().mark_superseded(old_doc, superseder_id, reason=reason)

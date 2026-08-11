@@ -27,19 +27,19 @@ await mem.connect_cosmos()
 THREAD_ID = "thread-abc-123"
 
 # Store user message
-await mem.add_cosmos(
+await mem.upsert_memory(
     user_id="user-1", thread_id=THREAD_ID,
     role="user", content="I need to migrate our PostgreSQL database to Cosmos DB.",
 )
 
 # Store agent response
-await mem.add_cosmos(
+await mem.upsert_memory(
     user_id="user-1", thread_id=THREAD_ID,
     role="agent", content="I can help with that. What's your current schema look like?",
 )
 
 # Store a tool call result with metadata
-await mem.add_cosmos(
+await mem.upsert_memory(
     user_id="user-1", thread_id=THREAD_ID,
     role="tool",
     content='{"tables": 12, "foreign_keys": 3}',
@@ -66,7 +66,7 @@ await mem.push_to_cosmos()
 await mem.update_cosmos(memory_id="<id>", content="Corrected message text")
 
 # Delete a memory (requires all partition key values)
-await mem.delete_cosmos(memory_id="<id>", user_id="user-1", thread_id=THREAD_ID)
+await mem.delete_memory(memory_id="<id>", user_id="user-1", thread_id=THREAD_ID)
 ```
 
 ---
@@ -206,7 +206,7 @@ New session starts
   ├─ Semantic search for prior facts (search_cosmos, memory_types=["fact"])
   │
   │  ┌── Conversation loop ──┐
-  │  │ Store each turn        │  (add_cosmos)
+  │  │ Store each turn        │  (upsert_memory)
   │  │ Optionally extract     │  (extract_facts - every N turns or on key exchanges)
   │  └────────────────────────┘
   │
@@ -228,10 +228,10 @@ system_prompt = build_prompt(profile, relevant)
 # --- Conversation loop ---
 while not done:
     user_msg = get_user_input()
-    await mem.add_cosmos(user_id="user-1", thread_id=THREAD_ID, role="user", content=user_msg)
+    await mem.upsert_memory(user_id="user-1", thread_id=THREAD_ID, role="user", content=user_msg)
 
     agent_reply = call_llm(system_prompt, user_msg)
-    await mem.add_cosmos(user_id="user-1", thread_id=THREAD_ID, role="agent", content=agent_reply)
+    await mem.upsert_memory(user_id="user-1", thread_id=THREAD_ID, role="agent", content=agent_reply)
 
 # --- Session end ---
 await mem.generate_thread_summary(user_id="user-1", thread_id=THREAD_ID)
@@ -266,7 +266,7 @@ In a multi-agent system, different agents share the same memory store but may re
 
 ```python
 # Research agent stores findings as turns
-await mem.add_cosmos(
+await mem.upsert_memory(
     user_id="user-1", thread_id="research-thread",
     role="agent", agent_id="research-agent",
     content="Found that the source DB has 12 tables with 3 foreign key chains.",
@@ -284,7 +284,7 @@ facts = await mem.search_cosmos(
 )
 
 # Planner writes its plan as a turn in its own thread
-await mem.add_cosmos(
+await mem.upsert_memory(
     user_id="user-1", thread_id="planning-thread",
     role="agent", agent_id="planner-agent",
     content=plan_text,
@@ -353,10 +353,10 @@ Both approaches use the same orchestrator and activities, so the output is ident
 
 | Operation | Method | When |
 |-----------|--------|------|
-| Store a turn | `add_cosmos` / `add_local` | Every user or agent message |
+| Store a turn | `upsert_memory` / `add_local` | Every user or agent message |
 | Bulk upload | `push_to_cosmos` | After collecting local turns |
 | Update a memory | `update_cosmos` | Correct or annotate an existing record |
-| Delete a memory | `delete_cosmos` | Remove incorrect or sensitive data |
+| Delete a memory | `delete_memory` | Remove incorrect or sensitive data |
 | Get a thread | `get_thread` | Load recent conversation context |
 | Semantic search | `search_cosmos` | Find relevant facts or summaries for a prompt |
 | Summarize a thread | `generate_thread_summary` | End of conversation, periodically, or automatic via change feed |

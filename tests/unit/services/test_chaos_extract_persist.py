@@ -11,18 +11,6 @@ from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
 from azure.cosmos.agent_memory.services.pipeline import PipelineService, _StoreContainerAdapter
 
 
-@pytest.fixture(autouse=True)
-def _pin_legacy_extract_dedup(monkeypatch):
-    monkeypatch.setattr(
-        "azure.cosmos.agent_memory.thresholds.get_dedup_vector_enabled",
-        lambda: False,
-    )
-    monkeypatch.setattr(
-        "azure.cosmos.agent_memory.aio.services.pipeline.get_dedup_vector_enabled",
-        lambda: False,
-    )
-
-
 class _FlakyContainer:
     def __init__(self):
         self.docs: dict[str, dict[str, Any]] = {}
@@ -65,7 +53,7 @@ class _Store:
         del partition_key
         return self.container.docs[item_id]
 
-    def add_cosmos(self, record: dict[str, Any]) -> dict[str, Any]:
+    def upsert_memory(self, record: dict[str, Any]) -> dict[str, Any]:
         self.container.docs[record["id"]] = dict(record)
         return record
 
@@ -81,8 +69,8 @@ class _AsyncStore(_Store):
     async def read_item(self, item_id: str, partition_key: Any):
         return super().read_item(item_id, partition_key)
 
-    async def add_cosmos(self, record: dict[str, Any]) -> dict[str, Any]:
-        return super().add_cosmos(record)
+    async def upsert_memory(self, record: dict[str, Any]) -> dict[str, Any]:
+        return super().upsert_memory(record)
 
     async def mark_superseded(self, old_doc: dict[str, Any], superseder_id: str, *, reason: str) -> bool:
         return super().mark_superseded(old_doc, superseder_id, reason=reason)

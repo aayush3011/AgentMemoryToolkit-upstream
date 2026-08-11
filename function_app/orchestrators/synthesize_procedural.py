@@ -58,12 +58,12 @@ def sp_SynthesizeProcedural(payload: dict) -> dict:
     result = pipeline.synthesize_procedural(user_id=user_id, force=force) or {}
     slim = {
         "status": result.get("status"),
-        "version": (result.get("procedural") or {}).get("version"),
+        "procedures_created": int(result.get("procedures_created") or 0),
     }
     logger.info(
-        "SynthesizeProcedural user=%s status=%s version=%s",
+        "SynthesizeProcedural user=%s status=%s procedures_created=%s",
         user_id,
         slim["status"],
-        slim["version"],
+        slim["procedures_created"],
     )
     return slim

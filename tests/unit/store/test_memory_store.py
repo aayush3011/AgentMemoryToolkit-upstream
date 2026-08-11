@@ -370,14 +370,14 @@ def test_build_episodic_context_forwards_search_options():
     store.search_episodic.assert_called_once_with("u1", "weather", top_k=3)
 
 
-def test_add_cosmos_routes_by_type():
+def test_upsert_memory_routes_by_type():
     turns = MagicMock()
     memories = MagicMock()
     summaries = MagicMock()
     store = MemoryStore(containers=_containers(turns=turns, memories=memories, summaries=summaries))
 
     for memory_type in ("turn", "fact", "episodic", "procedural", "thread_summary", "user_summary"):
-        store.add_cosmos(_doc(id=f"{memory_type}_id", type=memory_type))
+        store.upsert_memory(_doc(id=f"{memory_type}_id", type=memory_type))
 
     assert turns.upsert_item.call_count == 1
     assert memories.upsert_item.call_count == 3

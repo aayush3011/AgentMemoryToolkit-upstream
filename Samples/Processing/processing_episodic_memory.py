@@ -183,7 +183,7 @@ def main() -> None:
     try:
         banner("1. Adding conversation turns")
         for role, content in CONVERSATION:
-            mem.add_cosmos(user_id=user_id, role=role, content=content, thread_id=thread_id)
+            mem.upsert_memory(user_id=user_id, role=role, content=content, thread_id=thread_id)
             print(f"  [{role:>5}] {content}")
 
         banner("2. Finalizing episodes (flush the open segment)")
@@ -228,7 +228,7 @@ def main() -> None:
                     continue
                 seen_ids.add(memory_id)
                 try:
-                    mem.delete_cosmos(
+                    mem.delete_memory(
                         memory_id=memory_id,
                         user_id=user_id,
                         thread_id=record.get("thread_id", thread_id),

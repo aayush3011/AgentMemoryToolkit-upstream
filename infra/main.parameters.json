@@ -51,13 +51,28 @@
       "value": "${THREAD_SUMMARY_EVERY_N=10}"
     },
     "factExtractionEveryN": {
-      "value": "${FACT_EXTRACTION_EVERY_N=1}"
+      "value": "${FACT_EXTRACTION_EVERY_N=2}"
     },
     "dedupEveryN": {
       "value": "${DEDUP_EVERY_N=5}"
     },
     "userSummaryEveryN": {
       "value": "${USER_SUMMARY_EVERY_N=20}"
+    },
+    "episodeEvalEveryN": {
+      "value": "${EPISODE_EVAL_EVERY_N=4}"
+    },
+    "episodeIdleGapSeconds": {
+      "value": "${EPISODE_IDLE_GAP_SECONDS=1800}"
+    },
+    "episodeTopicDrift": {
+      "value": "${EPISODE_TOPIC_DRIFT=0}"
+    },
+    "episodeMaxTurns": {
+      "value": "${EPISODE_MAX_TURNS=40}"
+    },
+    "episodeMinTurns": {
+      "value": "${EPISODE_MIN_TURNS=2}"
     },
     "maxBatchSize": {
       "value": "${MAX_BATCH_SIZE=20}"

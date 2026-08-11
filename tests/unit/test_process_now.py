@@ -31,7 +31,7 @@ def _patch_get_thread(client, turns):
 def test_process_now_with_inprocess_invokes_full_pipeline():
     """process_now must fire ALL FIVE steps for InProcess: thread_summary, extract,
     reconcile, procedural, user_summary. Pre-fix this was only the first 3, so
-    procedural + user_summary never ran when callers used add_cosmos + process_now."""
+    procedural + user_summary never ran when callers used upsert_memory + process_now."""
     client = _connected()  # default → InProcessProcessor lazily built
     pipeline = MagicMock()
     pipeline.generate_thread_summary.return_value = {"id": "s", "type": "thread_summary"}

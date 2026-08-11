@@ -94,8 +94,8 @@ memory.connect_cosmos()  # auto-creates database + containers if missing
 USER, THREAD = "user-001", str(uuid.uuid4())
 
 # Add raw turns to a conversation
-memory.add_cosmos(user_id=USER, thread_id=THREAD, role="user", content="I love Cosmos DB.")
-memory.add_cosmos(user_id=USER, thread_id=THREAD, role="assistant", content="It is fantastic.")
+memory.upsert_memory(user_id=USER, thread_id=THREAD, role="user", content="I love Cosmos DB.")
+memory.upsert_memory(user_id=USER, thread_id=THREAD, role="assistant", content="It is fantastic.")
 
 # Run the processing pipeline (thread summary + fact extraction + user summary)
 memory.process_now(user_id=USER, thread_id=THREAD)
@@ -128,7 +128,7 @@ See [`Samples/`](Samples/) for end-to-end scenarios (chat memory, RAG, multi-age
 
 | Concept            | What it is                                                              | API                                                   |
 |--------------------|-------------------------------------------------------------------------|-------------------------------------------------------|
-| **Turn**           | One message (user or assistant) - the raw conversation atom             | `add_cosmos(...)`, `add_local(...)`                   |
+| **Turn**           | One message (user or assistant) - the raw conversation atom             | `upsert_memory(...)`, `add_local(...)`                   |
 | **Thread summary** | LLM-generated, incrementally updated rollup of a single thread          | `generate_thread_summary(...)`                        |
 | **Fact**           | Discrete, independently searchable assertion extracted from turns       | `extract_memories(...)`                               |
 | **Procedural**     | Behavioral rule / instruction the user wants followed                   | `extract_memories(...)`                               |
@@ -191,13 +191,13 @@ By default, the **InProcess processor** runs each pipeline step independently as
 
 | Env var                   | Default          | Step that fires                                                                                                   | Async behavior                      |
 |---------------------------|------------------|-------------------------------------------------------------------------------------------------------------------|-------------------------------------|
-| `FACT_EXTRACTION_EVERY_N` | `1` (every turn) | `process_extract_memories`                                                                                        | scheduled via `asyncio.create_task` |
+| `FACT_EXTRACTION_EVERY_N` | `2` (every 2 turns) | `process_extract_memories`                                                                                        | scheduled via `asyncio.create_task` |
 | `DEDUP_EVERY_N`           | `5`              | `process_reconcile` (fires every Nth extract → effectively every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns) | scheduled via `asyncio.create_task` |
 | `DEDUP_POOL_SIZE`         | `50`             | pool size (`n`) passed to `process_reconcile` from the auto-trigger; hard-capped at `500`                         | n/a (per-call)                      |
 | `THREAD_SUMMARY_EVERY_N`  | `10`             | `process_thread_summary`                                                                                          | scheduled via `asyncio.create_task` |
 | `USER_SUMMARY_EVERY_N`    | `20`             | `process_user_summary`                                                                                            | scheduled via `asyncio.create_task` |
 
-Each `*_EVERY_N=0` disables only that step. Dedup is gated independently of extract because cross-thread dedup is dramatically more expensive than per-thread extract (it reads every active fact for the user) - running it on every extract slammed AI Foundry. The Durable backend uses the same defaults via the change-feed function app (the function-app `azd` deploy bumps `FACT_EXTRACTION_EVERY_N` to `5` since the FA path is intended for higher-volume workloads). Calling `process_now()` is normally redundant - it remains as an explicit "process now" hook for tests, manual workflows, and operators who set every threshold to `0`.
+Each `*_EVERY_N=0` disables only that step. Dedup is gated independently of extract because cross-thread dedup is dramatically more expensive than per-thread extract (it reads every active fact for the user) - running it on every extract slammed AI Foundry. The Durable backend uses the same defaults via the change-feed function app; bump `FACT_EXTRACTION_EVERY_N` / `DEDUP_EVERY_N` for cost-sensitive, higher-volume production traffic. Calling `process_now()` is normally redundant - it remains as an explicit "process now" hook for tests, manual workflows, and operators who set every threshold to `0`.
 
 The async client (`AsyncCosmosMemoryClient.push_to_cosmos`) does **not** await the auto-trigger; it schedules it as a background `asyncio.Task` so the write call returns as soon as the Cosmos upserts complete. Background failures are surfaced via `logger.warning` (search for `"Background auto-trigger task failed"`).
 

@@ -12,6 +12,7 @@ field to the matching subclass.
 
 from __future__ import annotations
 
+import math
 import re
 import uuid
 from datetime import datetime, timezone
@@ -51,6 +52,70 @@ class MemoryType(str, Enum):
     user_summary = "user_summary"
     procedural = "procedural"
     episodic = "episodic"
+
+
+class ProcedureKind(str, Enum):
+    """The kind of atomic procedural knowledge a procedure captures."""
+
+    behavioral_policy = "behavioral_policy"
+    workflow = "workflow"
+    decision_rule = "decision_rule"
+    tool_usage = "tool_usage"
+    recovery_strategy = "recovery_strategy"
+
+
+class ProcedureScopeType(str, Enum):
+    """How broadly a procedure applies. More specific scopes override broader ones."""
+
+    global_scope = "global"
+    user = "user"
+    agent = "agent"
+    domain = "domain"
+    project = "project"
+    workflow = "workflow"
+    tool = "tool"
+
+
+class ProcedureStatus(str, Enum):
+    """Lifecycle state of a procedure. Only ``active`` procedures are compiled/injected."""
+
+    candidate = "candidate"
+    active = "active"
+    deprecated = "deprecated"
+    rejected = "rejected"
+
+
+class ProcedureSourceKind(str, Enum):
+    """Where a procedure came from - gates whether it may become active policy."""
+
+    explicit_user_instruction = "explicit_user_instruction"
+    observed_user_preference = "observed_user_preference"
+    organization_policy = "organization_policy"
+    episode_distillation = "episode_distillation"
+    document_content = "document_content"
+    agent_inference = "agent_inference"
+
+
+class ProcedureSourceAuthority(str, Enum):
+    """How authoritative a procedure's source is, for conflict resolution and gating."""
+
+    mandatory = "mandatory"
+    high = "high"
+    medium = "medium"
+    low = "low"
+
+
+# Source kinds trusted enough to auto-activate a procedure as behavioral policy.
+# Untrusted kinds (document_content, agent_inference) stay ``candidate`` until
+# validated or explicitly approved - this stops an imperative sentence lifted
+# from a document, or a one-off agent guess, from silently becoming agent policy.
+TRUSTED_PROCEDURE_SOURCE_KINDS: frozenset[ProcedureSourceKind] = frozenset(
+    {
+        ProcedureSourceKind.explicit_user_instruction,
+        ProcedureSourceKind.observed_user_preference,
+        ProcedureSourceKind.organization_policy,
+    }
+)
 
 
 def _uuid4_str() -> str:
@@ -471,18 +536,59 @@ class EpisodicRecord(MemoryRecordBase):
         return self
 
 
+class ProcedureStep(BaseModel):
+    """One ordered step in a procedure's execution."""
+
+    sequence: int
+    instruction: str
+    expected_result: Optional[str] = None
+    on_failure: Optional[str] = None
+    tool_name: Optional[str] = None
+
+
 class ProceduralRecord(MemoryRecordBase):
-    """Synthesized agent self-knowledge: the active personalized system prompt."""
+    """An atomic, reusable procedural memory: a behavioral policy or task skill.
+
+    Procedural memory answers "what should I do, and how should I do it" - stored
+    as many small, independently retrievable units (a policy/skill library), not
+    as one compiled system prompt. The runtime personalized system prompt is a
+    deterministic projection of the active, in-scope procedures (built by
+    ``build_procedural_context``); it is not stored as a record here.
+    """
 
     memory_type: Literal[MemoryType.procedural] = Field(  # type: ignore[assignment]
         alias="type", default=MemoryType.procedural
     )
+
+    name: str
+    summary: str
+    retrieval_text: str
+
+    procedure_kind: ProcedureKind
+    scope_type: ProcedureScopeType = ProcedureScopeType.user
+    scope_value: Optional[str] = None
+
+    activation_conditions: list[str] = Field(default_factory=list)
+    preconditions: list[str] = Field(default_factory=list)
+    steps: list[ProcedureStep] = Field(default_factory=list)
+    success_conditions: list[str] = Field(default_factory=list)
+    failure_conditions: list[str] = Field(default_factory=list)
+    safety_constraints: list[str] = Field(default_factory=list)
+
+    status: ProcedureStatus = ProcedureStatus.candidate
+    priority: int = 0
+    utility_score: float = 0.5
+    successful_uses: int = 0
+    failed_uses: int = 0
+
+    source_kind: ProcedureSourceKind = ProcedureSourceKind.agent_inference
+    source_authority: ProcedureSourceAuthority = ProcedureSourceAuthority.low
+    source_turn_ids: list[str] = Field(default_factory=list)
+
     content_hash: Optional[str] = None
-    prompt_id: str
-    prompt_version: str = "v1"
+    prompt_id: Optional[str] = None
+    prompt_version: str = "v2"
     version: int = 1
-    source_fact_ids: list[str] = Field(default_factory=list)
-    source_episodic_ids: list[str] = Field(default_factory=list)
 
     _ID_PREFIX: ClassVar[Optional[str]] = "proc_"
 
@@ -495,12 +601,26 @@ class ProceduralRecord(MemoryRecordBase):
             raise ValueError(f"ProceduralRecord.version must be a positive integer, got {v!r}")
         return v
 
+    @field_validator("utility_score", mode="before")
+    @classmethod
+    def _clamp_utility(cls, v: Any) -> Any:
+        if v is None:
+            return 0.5
+        try:
+            value = float(v)
+        except (TypeError, ValueError):
+            return 0.5
+        if not math.isfinite(value):
+            return 0.5
+        return min(1.0, max(0.0, value))
+
     @model_validator(mode="after")
-    def _require_sources(self) -> "ProceduralRecord":
-        if not self.source_fact_ids and not self.source_episodic_ids:
-            raise ValueError(
-                "ProceduralRecord requires at least one of source_fact_ids or source_episodic_ids to be non-empty"
-            )
+    def _require_executable_steps(self) -> "ProceduralRecord":
+        # A workflow/recovery_strategy asserts a multi-step method; requiring at
+        # least one step keeps such procedures executable rather than empty.
+        # ``procedure_kind`` is a plain string here (model_config use_enum_values).
+        if self.procedure_kind in (ProcedureKind.workflow, ProcedureKind.recovery_strategy) and not self.steps:
+            raise ValueError(f"ProceduralRecord of kind {self.procedure_kind} requires at least one step")
         return self
 
 
@@ -603,6 +723,13 @@ __all__ = [
     "EpisodeEvent",
     "EpisodeOutcome",
     "EpisodicRecord",
+    "ProcedureStep",
+    "ProcedureKind",
+    "ProcedureScopeType",
+    "ProcedureStatus",
+    "ProcedureSourceKind",
+    "ProcedureSourceAuthority",
+    "TRUSTED_PROCEDURE_SOURCE_KINDS",
     "ProceduralRecord",
     "TYPED_RECORD_CLASSES",
     "TAG_PATTERN",

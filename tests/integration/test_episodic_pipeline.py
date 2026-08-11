@@ -140,7 +140,7 @@ def _write_hiking_thread(mem: CosmosMemoryClient, user_id: str, thread_id: str) 
     turn_ids = set()
     for role, content in turns:
         turn_ids.add(
-            mem.add_cosmos(
+            mem.upsert_memory(
                 user_id=user_id,
                 role=role,
                 content=content,

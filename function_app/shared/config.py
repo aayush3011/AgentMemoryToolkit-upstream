@@ -3,16 +3,21 @@
 All knobs are read from environment variables / Azure Functions app settings.
 Defaults:
 
-* ``FACT_EXTRACTION_EVERY_N``      - default 1 (per-turn extraction)
+* ``FACT_EXTRACTION_EVERY_N``      - default 2 (extract every 2 turns)
 * ``THREAD_SUMMARY_EVERY_N``       - default 10 (rolling summary cadence)
+* ``EPISODE_EVAL_EVERY_N``         - default 4 (boundary-evaluation cadence)
+* ``EPISODE_IDLE_GAP_SECONDS``     - default 1800
+* ``EPISODE_TOPIC_DRIFT``          - default 0.0
+* ``EPISODE_MAX_TURNS``            - default 40
+* ``EPISODE_MIN_TURNS``            - default 2
 * ``USER_SUMMARY_EVERY_N``         - default 20
 * ``PROCEDURAL_SYNTHESIS_AUTO``    - default true
 * ``MAX_BATCH_SIZE``               - default 20
 
-The fact-extraction default of ``1`` - every
-new turn produces fresh facts. Operators can raise this for cost-sensitive
-workloads. Summaries default to ``10`` because each summary call sees the
-full recent context window and is the most expensive per-call operation.
+The fact-extraction default of ``2`` extracts facts every second turn.
+Operators can raise this for cost-sensitive workloads. Summaries default to
+``10`` because each summary call sees the full recent context window and is
+the most expensive per-call operation.
 
 Setting any ``*_EVERY_N`` env var to ``"0"`` disables that orchestrator
 entirely. ``PROCEDURAL_SYNTHESIS_AUTO=false`` disables the chained
@@ -37,6 +42,7 @@ need finer per-boundary fan-out should lower ``MAX_BATCH_SIZE`` and raise
 from __future__ import annotations
 
 import logging
+import math
 import os
 
 logger = logging.getLogger(__name__)
@@ -62,6 +68,11 @@ USER_COUNTER_THREAD_ID = "__counters__"
 
 from azure.cosmos.agent_memory.thresholds import (  # noqa: E402
     DEFAULT_DEDUP_EVERY_N,
+    DEFAULT_EPISODE_EVAL_EVERY_N,
+    DEFAULT_EPISODE_IDLE_GAP_SECONDS,
+    DEFAULT_EPISODE_MAX_TURNS,
+    DEFAULT_EPISODE_MIN_TURNS,
+    DEFAULT_EPISODE_TOPIC_DRIFT,
     DEFAULT_FACT_EXTRACTION_EVERY_N,
     DEFAULT_PROCEDURAL_SYNTHESIS_AUTO,
     DEFAULT_THREAD_SUMMARY_EVERY_N,
@@ -129,6 +140,34 @@ def _parse_bool(name: str, default: bool) -> bool:
     return default
 
 
+def _parse_threshold_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        parsed = float(raw)
+    except (ValueError, TypeError):
+        logger.warning("Invalid value for %s=%r, using default %s", name, raw, default)
+        return default
+    if not math.isfinite(parsed):
+        logger.warning(
+            "Non-finite value for %s=%r is not allowed; using default %s",
+            name,
+            raw,
+            default,
+        )
+        return default
+    if parsed < 0:
+        logger.warning(
+            "Negative value for %s=%r is not allowed; using default %s (set to 0 to disable)",
+            name,
+            raw,
+            default,
+        )
+        return default
+    return parsed
+
+
 def get_max_batch_size() -> int:
     return _parse_int("MAX_BATCH_SIZE", DEFAULT_MAX_BATCH_SIZE)
 
@@ -146,6 +185,42 @@ def get_fact_extraction_every_n() -> int:
     return _parse_threshold(
         "FACT_EXTRACTION_EVERY_N",
         DEFAULT_FACT_EXTRACTION_EVERY_N,
+    )
+
+
+def get_episode_eval_every_n() -> int:
+    """Boundary-evaluation cadence in turns. ``0`` disables episodic memory."""
+    return _parse_threshold(
+        "EPISODE_EVAL_EVERY_N",
+        DEFAULT_EPISODE_EVAL_EVERY_N,
+    )
+
+
+def get_episode_idle_gap_seconds() -> int:
+    return _parse_threshold(
+        "EPISODE_IDLE_GAP_SECONDS",
+        DEFAULT_EPISODE_IDLE_GAP_SECONDS,
+    )
+
+
+def get_episode_topic_drift() -> float:
+    return _parse_threshold_float(
+        "EPISODE_TOPIC_DRIFT",
+        DEFAULT_EPISODE_TOPIC_DRIFT,
+    )
+
+
+def get_episode_max_turns() -> int:
+    return _parse_threshold(
+        "EPISODE_MAX_TURNS",
+        DEFAULT_EPISODE_MAX_TURNS,
+    )
+
+
+def get_episode_min_turns() -> int:
+    return _parse_threshold(
+        "EPISODE_MIN_TURNS",
+        DEFAULT_EPISODE_MIN_TURNS,
     )
 
 

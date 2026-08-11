@@ -1,6 +1,6 @@
 """Memory-extraction orchestrator + activities.
 
-Chain: ``Extract`` → ``Dedup`` → ``Persist`` followed by an optional
+Chain: ``Extract`` -> ``Persist`` followed by an optional
 ``ReconcileMemories`` activity, then a best-effort
 ``SynthesizeProceduralOrchestrator`` sub-call.
 Reconciliation is gated by the change-feed trigger (which tracks the
@@ -8,7 +8,7 @@ per-user/thread turn counter) and signaled to the orchestrator via the
 ``reconcile`` flag on its input payload. Procedural synthesis fires only
 after reconcile and only when ``PROCEDURAL_SYNTHESIS_AUTO`` is enabled, so
 operators have a kill-switch for the extra LLM call. The prompt is always
-derived from the deduped fact pool. Redundant concurrent runs across threads
+derived from the extracted fact pool. Redundant concurrent runs across threads
 are cheap because the pipeline short-circuits with ``status="unchanged"``
 when the source fact/episodic IDs have not moved.
 """
@@ -45,15 +45,10 @@ def ExtractMemoriesOrchestrator(context: df.DurableOrchestrationContext):
         retry,
         extract_payload,
     )
-    deduped = yield context.call_activity_with_retry(
-        "em_Dedup",
-        retry,
-        {"user_id": user_id, "extracted": extracted},
-    )
     persisted = yield context.call_activity_with_retry(
         "em_Persist",
         retry,
-        {"user_id": user_id, "extracted": deduped},
+        {"user_id": user_id, "extracted": extracted},
     )
 
     count = payload.get("count")
@@ -124,18 +119,6 @@ def em_Extract(payload: dict) -> dict:
 
 
 @bp.activity_trigger(input_name="payload")
-def em_Dedup(payload: dict) -> dict:
-    """vector-floor dedup ladder (gated; passthrough when disabled)."""
-    return (
-        get_pipeline().dedup_extracted_memories(
-            user_id=payload["user_id"],
-            extracted=payload["extracted"],
-        )
-        or payload["extracted"]
-    )
-
-
-@bp.activity_trigger(input_name="payload")
 def em_Persist(payload: dict) -> dict:
     """Persist extracted docs with embeddings and deterministic create semantics."""
     user_id = payload["user_id"]
@@ -149,7 +132,7 @@ def em_Persist(payload: dict) -> dict:
 
 @bp.activity_trigger(input_name="payload")
 async def em_AdvanceExtractWatermark(payload: dict) -> bool:
-    """Advance the extraction watermark after a successful extract→persist.
+    """Advance the extraction watermark after a successful extract->persist.
 
     Stamps ``last_extract_count`` on the thread counter so the next batch's
     recent_k spans only turns added since this run, never skipping any.
@@ -169,7 +152,7 @@ async def em_AdvanceExtractWatermark(payload: dict) -> bool:
 @bp.activity_trigger(input_name="payload")
 def em_ReconcileMemories(payload: dict) -> dict:
     # GA keeps reconcile single-activity: its LLM dedup decisions and supersession
-    # operations are larger/more coupled than the extract→dedup→persist split handled here.
+    # operations are larger/more coupled than the extract/persist flow handled here.
     user_id = payload["user_id"]
     pipeline = get_pipeline()
     from azure.cosmos.agent_memory.thresholds import get_dedup_pool_size

@@ -35,7 +35,7 @@ def _banner(title: str) -> None:
 
 def _add_dialogue(mem: CosmosMemoryClient, user_id: str, ticket: str, dialogue: list[tuple[str, str]]) -> None:
     for role, content in dialogue:
-        mem.add_cosmos(user_id=user_id, role=role, content=content, thread_id=ticket)
+        mem.upsert_memory(user_id=user_id, role=role, content=content, thread_id=ticket)
         print(f"  [{role:>5}] {content[:90]}")
 
 

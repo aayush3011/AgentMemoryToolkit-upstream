@@ -51,11 +51,11 @@ class TestSynthesizeProceduralOrchestrator:
         ctx = _make_context({"user_id": "u1", "force": True})
         gen = self._orchestrator()(ctx)
 
-        result, _ = _drive(gen, [{"status": "synthesized", "version": 3}])
+        result, _ = _drive(gen, [{"status": "synthesized", "procedures_created": 2}])
 
         assert [call[0] for call in ctx._yielded_calls] == ["sp_SynthesizeProcedural"]
         assert ctx._yielded_calls[0][2] == {"user_id": "u1", "force": True}
-        assert result == {"status": "synthesized", "version": 3}
+        assert result == {"status": "synthesized", "procedures_created": 2}
 
 
 @pytest.mark.parametrize(
@@ -63,13 +63,13 @@ class TestSynthesizeProceduralOrchestrator:
     [
         (
             {"user_id": "u1", "force": True},
-            {"status": "synthesized", "procedural": {"id": "proc_u1_3", "version": 3, "content": "Prompt"}},
-            {"status": "synthesized", "version": 3},
+            {"status": "synthesized", "procedures_created": 2},
+            {"status": "synthesized", "procedures_created": 2},
         ),
         (
             {"user_id": "u2", "force": False},
-            {"status": "unchanged", "procedural": None},
-            {"status": "unchanged", "version": None},
+            {"status": "unchanged", "procedures_created": 0},
+            {"status": "unchanged", "procedures_created": 0},
         ),
     ],
 )
@@ -86,4 +86,4 @@ def test_activity_calls_pipeline_and_returns_slim_payload(mock_get_pipeline, pay
         force=payload.get("force", False),
     )
     assert result == expected
-    assert "procedural" not in result
+    assert "version" not in result

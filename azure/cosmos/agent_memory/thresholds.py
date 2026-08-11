@@ -5,9 +5,6 @@ InProcess and Durable backends fire on the same turn boundaries by default.
 Operators override via the documented env vars; both backends read the same
 keys, so a single setting flips both.
 
-Exception: the ``EPISODE_*`` knobs (boundary segmentation cadence and tuning)
-are in-process only - the Durable Functions backend has no episodic path yet,
-so there is no ``function_app/shared/config.py`` mirror for them.
 """
 
 from __future__ import annotations
@@ -20,7 +17,7 @@ from azure.cosmos.agent_memory.logging import get_logger
 
 logger = get_logger(__name__)
 
-DEFAULT_FACT_EXTRACTION_EVERY_N = 1
+DEFAULT_FACT_EXTRACTION_EVERY_N = 2
 DEFAULT_THREAD_SUMMARY_EVERY_N = 10
 # Episodic memory is boundary-based, not turn-cadence: the turn stream is
 # segmented into coherent experiences and each *closed* segment becomes one
@@ -63,14 +60,6 @@ DEFAULT_DEDUP_EVERY_N = 5
 # parameter of :py:meth:`ProcessingPipeline.reconcile_memories`. Hard cap
 # of 500 (enforced by the pipeline) bounds prompt size and LLM cost.
 DEFAULT_DEDUP_POOL_SIZE = 50
-# Write-time in-place near-duplicate folding. When enabled, a freshly
-# extracted memory that is >= DEDUP_SIM_HIGH similar to an existing active
-# memory is folded into that record in place instead of persisting as a new
-# doc. Default OFF (add-only): keeping every extracted memory preserves the
-# retrieval surface, which benchmarked better than folding. Operators set
-# ``DEDUP_VECTOR_ENABLED=true`` to turn folding back on.
-DEFAULT_DEDUP_VECTOR_ENABLED = False
-
 # ---------------------------------------------------------------------------
 # INTERNAL dedup/search tuning - NOT customer-configurable.
 # These ship as fixed feature constants (no env vars, not in any settings
@@ -78,7 +67,6 @@ DEFAULT_DEDUP_VECTOR_ENABLED = False
 # needs to become operator-facing we add the env plumbing back deliberately.
 # ---------------------------------------------------------------------------
 EXTRACTION_BATCH_MAX_TOKENS = 7000
-DEDUP_SIM_HIGH = 0.97  # >= -> fold new memory into existing canonical in place
 
 DEFAULT_TTL_BY_TYPE: dict[str, int] = {
     "turn": 2_592_000,
@@ -254,17 +242,6 @@ def get_extraction_batch_max_tokens() -> int:
     return EXTRACTION_BATCH_MAX_TOKENS
 
 
-def get_dedup_vector_enabled() -> bool:
-    """Whether write-time vector deduplication (in-place folding) is enabled."""
-    return _parse_bool("DEDUP_VECTOR_ENABLED", DEFAULT_DEDUP_VECTOR_ENABLED)
-
-
-def get_dedup_sim_high() -> float:
-    """Similarity at/above which a new memory is folded into its existing
-    canonical record in place (internal)."""
-    return DEDUP_SIM_HIGH
-
-
 def get_procedural_synthesis_auto() -> bool:
     """Whether procedural synthesis auto-fires after extract.
 
@@ -335,7 +312,6 @@ __all__ = [
     "DEFAULT_USER_SUMMARY_EVERY_N",
     "DEFAULT_DEDUP_EVERY_N",
     "DEFAULT_DEDUP_POOL_SIZE",
-    "DEFAULT_DEDUP_VECTOR_ENABLED",
     "DEFAULT_TTL_BY_TYPE",
     "DEFAULT_PROCEDURAL_SYNTHESIS_AUTO",
     "DEFAULT_ENABLE_TURN_EMBEDDINGS",
@@ -353,8 +329,6 @@ __all__ = [
     "get_dedup_every_n",
     "get_dedup_pool_size",
     "get_extraction_batch_max_tokens",
-    "get_dedup_vector_enabled",
-    "get_dedup_sim_high",
     "get_procedural_synthesis_auto",
     "get_enable_turn_embeddings",
     "get_processor_owner",

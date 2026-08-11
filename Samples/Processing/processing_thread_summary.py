@@ -60,7 +60,7 @@ def main() -> None:
         ("agent", "10–14 days lets you spend ~5 days in each city plus some day trips."),
     ]
     for role, content in initial:
-        mem.add_cosmos(user_id=user_id, role=role, content=content, thread_id=thread_id)
+        mem.upsert_memory(user_id=user_id, role=role, content=content, thread_id=thread_id)
         print(f"  [{role:>5}] {content[:80]}")
 
     _banner("STEP 2 – generate first summary")
@@ -79,7 +79,7 @@ def main() -> None:
         ("agent", "Shigetsu inside Tenryu-ji temple is famous for its shojin-ryori meals."),
     ]
     for role, content in follow_up:
-        mem.add_cosmos(user_id=user_id, role=role, content=content, thread_id=thread_id)
+        mem.upsert_memory(user_id=user_id, role=role, content=content, thread_id=thread_id)
         print(f"  [{role:>5}] {content[:80]}")
 
     doc2 = mem.generate_thread_summary(user_id=user_id, thread_id=thread_id)

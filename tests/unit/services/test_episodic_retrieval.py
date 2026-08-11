@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 from unittest.mock import MagicMock
 
 from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory.cosmos_memory_client import CosmosMemoryClient
 from azure.cosmos.agent_memory.store import MemoryStore
+
+EPISODIC_OPT_IN_WARNING = "Episodic memories requested via memory_types are only returned when include_episodes=True"
 
 
 def _containers(*, memories: Any = None, turns: Any = None, summaries: Any = None) -> dict[ContainerKey, Any]:
@@ -81,6 +84,35 @@ def test_search_cosmos_base_is_facts_only_no_episodes_without_optin() -> None:
     assert [doc["id"] for doc in result] == ["fact", "summary", "turn"]
     assert store.search.call_args.kwargs["memory_types"] == ["fact"]
     store.search_episodic.assert_not_called()
+
+
+def test_search_cosmos_warns_when_episodic_requested_without_optin(caplog) -> None:
+    store = MagicMock()
+    store.search.return_value = []
+    client = _client_with_store(store)
+    caplog.set_level(logging.WARNING)
+
+    result = client.search_cosmos("ci retries", user_id="u1", memory_types=["episodic"])
+
+    assert result == []
+    assert EPISODIC_OPT_IN_WARNING in caplog.text
+    assert store.search.call_args.kwargs["memory_types"] == ["fact"]
+
+
+def test_search_cosmos_does_not_warn_for_episodic_optin_or_other_types(caplog) -> None:
+    store = MagicMock()
+    store.search.return_value = []
+    client = _client_with_store(store)
+    caplog.set_level(logging.WARNING)
+
+    client.search_cosmos("ci retries", user_id="u1", memory_types=["episodic"], include_episodes=True)
+    assert EPISODIC_OPT_IN_WARNING not in caplog.text
+    assert store.search.call_args.kwargs["memory_types"] == ["episodic"]
+
+    caplog.clear()
+    client.search_cosmos("ci retries", user_id="u1", memory_types=["fact"])
+    assert EPISODIC_OPT_IN_WARNING not in caplog.text
+    assert store.search.call_args.kwargs["memory_types"] == ["fact"]
 
 
 def test_search_cosmos_include_episodes_combines_facts_and_episodes_in_base_query() -> None:

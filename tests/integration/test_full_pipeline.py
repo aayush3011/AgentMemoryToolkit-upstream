@@ -78,7 +78,7 @@ def _add_turns(
     turns: list[tuple[str, str]],
 ) -> None:
     for role, content in turns:
-        mem.add_cosmos(
+        mem.upsert_memory(
             user_id=user_id,
             role=role,
             content=content,
@@ -132,7 +132,7 @@ def _seed_fact_with_embedding(
 ) -> None:
     """Seed a fact and confirm it was stored *with* an embedding.
 
-    ``add_cosmos`` generates the embedding synchronously; a transient
+    ``upsert_memory`` generates the embedding synchronously; a transient
     embedding-service blip logs "proceeding without embedding" and stores the doc
     without a vector, which would leave the extract-time vector floor with no
     neighbour to match. Retry until an embedded copy exists (indexing is fast -
@@ -141,7 +141,7 @@ def _seed_fact_with_embedding(
     check = "SELECT c.id FROM c WHERE c.user_id = @uid AND c.content = @content AND IS_DEFINED(c.embedding)"
     params = [{"name": "@uid", "value": user_id}, {"name": "@content", "value": content}]
     for _ in range(retries):
-        mem.add_cosmos(
+        mem.upsert_memory(
             user_id=user_id,
             role="user",
             content=content,
@@ -169,7 +169,7 @@ def _wait_vector_searchable(
 ) -> None:
     """Poll vector search until the user's seeded fact is retrievable.
 
-    ``add_cosmos`` stores the embedding synchronously, but Cosmos's DiskANN vector
+    ``upsert_memory`` stores the embedding synchronously, but Cosmos's DiskANN vector
     index catches up asynchronously (~1-2s). Gating on a real vector search makes
     the subsequent ``_vector_candidates`` lookup deterministic instead of racing
     the index."""
@@ -342,7 +342,7 @@ class TestSearchAfterExtraction:
 class TestTaggingAndSalience:
     def test_add_remove_tags_and_salience_filter(self, agent_memory, unique_user_id, unique_thread_id):
         try:
-            agent_memory.add_cosmos(
+            agent_memory.upsert_memory(
                 user_id=unique_user_id,
                 role="user",
                 content="The user prefers dark mode UI and uses VS Code.",
@@ -402,7 +402,7 @@ class TestReconciliation:
                 "The user resides in Seattle.",
                 "The user works at Microsoft as an engineer.",
             ]:
-                agent_memory.add_cosmos(
+                agent_memory.upsert_memory(
                     user_id=unique_user_id,
                     role="user",
                     content=content,
@@ -443,7 +443,7 @@ class TestReconciliation:
                 "User often orders the bone-in pork chop at steakhouses.",
             ]
             for content in contradictory_facts:
-                agent_memory.add_cosmos(
+                agent_memory.upsert_memory(
                     user_id=unique_user_id,
                     role="user",
                     content=content,
@@ -483,13 +483,13 @@ class TestReconciliation:
 
     def test_extract_content_hash_short_circuit(self, agent_memory, unique_user_id, unique_thread_id):
         try:
-            agent_memory.add_cosmos(
+            agent_memory.upsert_memory(
                 user_id=unique_user_id,
                 role="user",
                 content="My favorite color is teal.",
                 thread_id=unique_thread_id,
             )
-            agent_memory.add_cosmos(
+            agent_memory.upsert_memory(
                 user_id=unique_user_id,
                 role="agent",
                 content="Got it, teal is a great color.",
@@ -531,7 +531,7 @@ class TestReconciliation:
                 "The user works as a data engineer at Microsoft in Seattle.",
             ]
             for content in paraphrases:
-                agent_memory.add_cosmos(
+                agent_memory.upsert_memory(
                     user_id=unique_user_id,
                     role="user",
                     content=content,
@@ -562,62 +562,5 @@ class TestReconciliation:
             survivor_id = sample_loser["superseded_by"]
             live = [m for m in all_facts if not m.get("superseded_by")]
             assert any(m["id"] == survivor_id for m in live), "supersede_by must point at a live record"
-        finally:
-            _cleanup(agent_memory, unique_user_id)
-
-
-class TestExtractTimeVectorDedup:
-    """Extract-time vector floor (``dedup_extracted_memories``), distinct from the
-    ``reconcile`` path. A freshly-extracted fact that near-duplicates an
-    *already-stored* fact is either auto-dropped (``vector_dedup_skipped``,
-    sim >= DEDUP_SIM_HIGH) or tagged ``sys:dup-candidate``
-    (``dup_candidates_tagged``, DEDUP_SIM_LOW <= sim < DEDUP_SIM_HIGH).
-
-    The ladder is driven directly with a controlled extracted fact rather than
-    through the LLM: extraction phrasing varies run-to-run and often lands the
-    fact below the 0.80 floor (or produces unrelated facts), which is a property
-    of the model, not the dedup code. Feeding a fixed near-duplicate keeps the
-    assertion deterministic while still exercising the real embedding call, the
-    live Cosmos ``VectorDistance`` query, and the similarity bands."""
-
-    def test_dedup_extracted_memories_flags_near_duplicate_of_stored_fact(
-        self, agent_memory, unique_user_id, unique_thread_id
-    ):
-        try:
-            # Seed a stored fact (embedded + vector-indexed) to dedup against.
-            # Concrete, minimally-reworded facts embed ~0.93-0.98 cosine - well
-            # inside the DEDUP_SIM_LOW (0.80) / DEDUP_SIM_HIGH (0.97) bands.
-            _seed_fact_with_embedding(
-                agent_memory, unique_user_id, unique_thread_id, "The user has a cat named Whiskers."
-            )
-            _wait_vector_searchable(agent_memory, unique_user_id, "cat named Whiskers")
-
-            # A controlled "extracted" near-duplicate (not byte-identical to the
-            # seed, so this is the vector floor rather than an exact-hash match).
-            extracted = {
-                "facts": [
-                    {
-                        "id": f"fact_{uuid.uuid4().hex}",
-                        "type": "fact",
-                        "user_id": unique_user_id,
-                        "thread_id": unique_thread_id,
-                        "content": "The user's cat is called Whiskers.",
-                        "tags": [],
-                    }
-                ],
-                "episodic": [],
-                "updates": [],
-            }
-            result = agent_memory._get_pipeline().dedup_extracted_memories(unique_user_id, extracted)
-
-            stats = next((op for op in result.get("updates", []) if op.get("op") == "stats"), {})
-            suppressed = int(stats.get("vector_dedup_skipped", 0)) + int(stats.get("dup_candidates_tagged", 0))
-            surviving = result.get("facts", [])
-            was_dropped = len(surviving) == 0
-            was_tagged = any("sys:dup-candidate" in (f.get("tags") or []) for f in surviving)
-            assert suppressed >= 1 and (was_dropped or was_tagged), (
-                "Vector floor should drop or tag the near-duplicate of the stored "
-                f"'cat named Whiskers' fact; surviving={surviving} stats={stats}"
-            )
         finally:
             _cleanup(agent_memory, unique_user_id)

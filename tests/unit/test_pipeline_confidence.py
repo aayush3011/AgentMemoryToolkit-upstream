@@ -13,14 +13,6 @@ from azure.cosmos.agent_memory.services.pipeline import PipelineService
 from azure.cosmos.agent_memory.store import MemoryStore
 
 
-@pytest.fixture(autouse=True)
-def _pin_legacy_extract_dedup(monkeypatch):
-    monkeypatch.setattr(
-        "azure.cosmos.agent_memory.thresholds.get_dedup_vector_enabled",
-        lambda: False,
-    )
-
-
 def _make_pipeline(llm_response: dict):
     turns_container = MagicMock()
     memories_container = MagicMock()
@@ -56,7 +48,6 @@ def _make_pipeline(llm_response: dict):
     pipeline = PipelineService(store, chat, embeddings, containers=containers)
     # Avoid real LLM/prompty calls.
     pipeline._run_prompty = MagicMock(return_value=json.dumps(llm_response))
-    pipeline._load_existing_memories = MagicMock(return_value=[])
 
     return pipeline, upserted
 

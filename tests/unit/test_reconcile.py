@@ -29,16 +29,6 @@ from azure.cosmos.agent_memory.exceptions import ValidationError
 from azure.cosmos.agent_memory.services.pipeline import PipelineService
 
 
-@pytest.fixture(autouse=True)
-def _pin_legacy_dedup_paths(monkeypatch):
-    """Disable write-time in-place folding so the extract-path tests here
-    exercise the plain ADD path deterministically."""
-    monkeypatch.setattr(
-        "azure.cosmos.agent_memory.thresholds.get_dedup_vector_enabled",
-        lambda: False,
-    )
-
-
 def _make_pipeline() -> PipelineService:
     p = PipelineService.__new__(PipelineService)
     p._embeddings = MagicMock()
@@ -226,21 +216,9 @@ class TestExactDedupShortCircuit:
         p._mark_superseded = MagicMock(return_value=True)
         return p
 
-    def test_extract_skips_when_content_hash_matches_existing(self):
-        from azure.cosmos.agent_memory._utils import compute_content_hash
-
+    def test_extract_skips_in_batch_duplicate_facts(self):
         p = self._build()
-        existing_text = "User likes coffee"
-        existing = [
-            {
-                "id": "fact_existing",
-                "type": "fact",
-                "content": existing_text,
-                "content_hash": compute_content_hash(existing_text),
-                "thread_id": "t1",
-                "tags": ["sys:fact"],
-            }
-        ]
+        dup_text = "User likes coffee"
         # extract_memories pulls turns directly from the container.
         turns = [
             {
@@ -252,19 +230,28 @@ class TestExactDedupShortCircuit:
             }
         ]
         p._container.query_items.return_value = iter(turns)
-        p._load_existing_memories = MagicMock(return_value=existing)
-        # Stub the LLM extraction to emit a duplicate fact (same text).
+        # Stub the LLM extraction to emit the SAME fact text twice in one batch;
+        # the second is an in-batch exact duplicate and must be skipped. There is
+        # no store-side preload query - cross-run duplicates are handled by the
+        # deterministic-id create (409) at write time instead.
         p._run_prompty = MagicMock(
             return_value=json.dumps(
                 {
                     "facts": [
                         {
-                            "text": existing_text,
+                            "text": dup_text,
                             "confidence": 0.9,
                             "salience": 0.6,
                             "action": "ADD",
                             "tags": ["sys:fact"],
-                        }
+                        },
+                        {
+                            "text": dup_text,
+                            "confidence": 0.9,
+                            "salience": 0.6,
+                            "action": "ADD",
+                            "tags": ["sys:fact"],
+                        },
                     ],
                     "procedural": [],
                     "episodic": [],
@@ -275,15 +262,13 @@ class TestExactDedupShortCircuit:
         out = p.extract_memories("u1", "t1")
 
         assert out["exact_dedup_skipped"] >= 1
-        assert out["fact_count"] == 0
-        # No new fact upserted (the only ADD got short-circuited).
-        assert all(call.args[0].get("type") != "fact" for call in p._upsert_memory.call_args_list)
+        # Exactly one fact survives the in-batch dedup.
+        assert out["fact_count"] == 1
 
     def test_extract_writes_content_hash_on_new_facts(self):
         from azure.cosmos.agent_memory._utils import compute_content_hash
 
         p = self._build()
-        p._load_existing_memories = MagicMock(return_value=[])
         turns = [
             {
                 "id": "turn-1",
@@ -337,19 +322,11 @@ class TestExactDedupCrossTypeIsolation:
         return p
 
     def test_fact_not_dropped_when_only_procedural_has_same_hash(self):
+        # With no store-side preload, extraction never cross-checks other types,
+        # so a procedural doc sharing a fact's content_hash cannot affect the fact
+        # bucket. A normal fact ADD is created and nothing is exact-dedup skipped.
         p = self._build()
         text = "Always reply in Spanish"
-        # Existing PROCEDURAL with that text - must NOT poison the FACT bucket.
-        existing = [
-            {
-                "id": "proc_existing",
-                "type": "procedural",
-                "content": text,
-                "content_hash": compute_content_hash(text),
-                "thread_id": "__procedural__",
-                "tags": ["sys:procedural"],
-            }
-        ]
         p._container.query_items.return_value = iter(
             [
                 {
@@ -361,7 +338,6 @@ class TestExactDedupCrossTypeIsolation:
                 }
             ]
         )
-        p._load_existing_memories = MagicMock(return_value=existing)
         p._run_prompty = MagicMock(
             return_value=json.dumps(
                 {
@@ -657,7 +633,6 @@ class TestExtractUpdateSelfCollapseGuard:
         p._turns_container = p._container
         p._summaries_container = p._container
         p._chat = MagicMock()
-        p._load_existing_memories = MagicMock(return_value=[])
         return p
 
     def test_procedural_update_with_self_referential_id_is_skipped(self):

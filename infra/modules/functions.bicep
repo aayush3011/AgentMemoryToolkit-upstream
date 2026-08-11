@@ -82,6 +82,21 @@ param dedupEveryN int
 @description('Run user-summary orchestration every N turns from a given user_id across all threads. 0 = disabled.')
 param userSummaryEveryN int
 
+@description('Evaluate an episode boundary every N turns within a (user_id, thread_id). 0 = disabled (no episodic memory).')
+param episodeEvalEveryN int
+
+@description('Idle gap (seconds) between two consecutive turns that closes the open episode.')
+param episodeIdleGapSeconds int
+
+@description('Cosine drift from the open segment centroid past which a new turn closes the prior episode. 0 = disabled.')
+param episodeTopicDrift string
+
+@description('Hard cap on turns in one open episode segment before a boundary is forced.')
+param episodeMaxTurns int
+
+@description('Minimum turns before a natural (idle/drift) boundary may close an episode.')
+param episodeMinTurns int
+
 @description('Maximum number of change-feed items processed per orchestration batch.')
 param maxBatchSize int
 
@@ -316,6 +331,26 @@ resource functionApp 'Microsoft.Web/sites@2023-12-01' = {
         {
           name: 'USER_SUMMARY_EVERY_N'
           value: string(userSummaryEveryN)
+        }
+        {
+          name: 'EPISODE_EVAL_EVERY_N'
+          value: string(episodeEvalEveryN)
+        }
+        {
+          name: 'EPISODE_IDLE_GAP_SECONDS'
+          value: string(episodeIdleGapSeconds)
+        }
+        {
+          name: 'EPISODE_TOPIC_DRIFT'
+          value: episodeTopicDrift
+        }
+        {
+          name: 'EPISODE_MAX_TURNS'
+          value: string(episodeMaxTurns)
+        }
+        {
+          name: 'EPISODE_MIN_TURNS'
+          value: string(episodeMinTurns)
         }
         {
           name: 'DEDUP_EVERY_N'

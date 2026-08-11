@@ -66,7 +66,7 @@ def main() -> None:
 
     print("Adding conversation turns…")
     for role, content in conversations:
-        mem.add_cosmos(user_id=user_id, role=role, content=content, thread_id=thread_id)
+        mem.upsert_memory(user_id=user_id, role=role, content=content, thread_id=thread_id)
         print(f"  [{role:>5}] {content[:80]}")
     print()
 

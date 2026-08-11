@@ -5,7 +5,7 @@ Demonstrates two agents (planner + researcher) sharing a single Cosmos DB
 thread so each can read the other's contributions via get_thread.
 
 Agent identity is tracked through metadata={"agent_id": "..."} on every
-add_cosmos call.
+upsert_memory call.
 
 Workflow:
     1. User posts a complex question.
@@ -76,7 +76,7 @@ def step1_user_question(
     """User asks a complex, multi-part question."""
     print_header("Step 1 - User posts a complex question")
 
-    mem.add_cosmos(
+    mem.upsert_memory(
         user_id=user_id,
         role="user",
         content=(
@@ -111,7 +111,7 @@ def step2_planner_creates_plan(
         "  3. Research end-of-life recycling challenges for both\n"
         "  4. Synthesise findings into a recommendation for urban fleets"
     )
-    mem.add_cosmos(
+    mem.upsert_memory(
         user_id=user_id,
         role="agent",
         content=plan,
@@ -170,7 +170,7 @@ def step3_researcher_performs_research(
     ]
 
     for f in findings:
-        mem.add_cosmos(
+        mem.upsert_memory(
             user_id=user_id,
             role="agent",
             content=f["content"],
@@ -206,7 +206,7 @@ def step4_planner_synthesises_answer(
         "mature.  Hydrogen fuel-cell vehicles may become competitive once "
         "green-hydrogen costs fall and recycling capacity scales."
     )
-    mem.add_cosmos(
+    mem.upsert_memory(
         user_id=user_id,
         role="agent",
         content=recommendation,

@@ -270,7 +270,7 @@ Bring the environment up in this order:
 2. verify Cosmos DB RBAC
 3. verify Azure OpenAI RBAC
 4. create Cosmos resources with `create_memory_store()`
-5. test `add_cosmos()` / `push_to_cosmos()` / `get_memories()`
+5. test `upsert_memory()` / `push_to_cosmos()` / `get_memories()`
 6. test `get_memories(user_id=..., thread_id=...)` filtering
 7. test `search_cosmos()`
 8. deploy the Function App (e.g., via `azd up`) so the change-feed processor is running
@@ -288,7 +288,7 @@ This keeps failures isolated and easier to diagnose.
 ### Basic Cosmos operations
 
 ```python
-memory.add_cosmos(user_id="user-1", role="user", content="Hello from Azure")
+memory.upsert_memory(user_id="user-1", role="user", content="Hello from Azure")
 print(memory.get_memories(user_id="user-1"))
 ```
 
@@ -300,12 +300,12 @@ print(memory.search_cosmos("hello", user_id="user-1"))
 
 ### Durable processing (change-feed driven)
 
-Processing is no longer invoked directly from the SDK - write turns with `add_cosmos()` / `push_to_cosmos()` and the deployed Function App's change-feed trigger fires the `extract_memories`, `thread_summary`, and `user_summary` orchestrators per the configured thresholds.
+Processing is no longer invoked directly from the SDK - write turns with `upsert_memory()` / `push_to_cosmos()` and the deployed Function App's change-feed trigger fires the `extract_memories`, `thread_summary`, and `user_summary` orchestrators per the configured thresholds.
 
 ```python
 # Write enough turns to cross THREAD_SUMMARY_EVERY_N (default 10).
 for i in range(10):
-    memory.add_cosmos(
+    memory.upsert_memory(
         user_id="user-1",
         thread_id="thread-1",
         role="user",
@@ -329,7 +329,7 @@ import uuid
 # Use a threshold of 3 (THREAD_SUMMARY_EVERY_N=3) for testing
 thread_id = str(uuid.uuid4())
 for i in range(3):
-    memory.add_cosmos(
+    memory.upsert_memory(
         user_id="user-1",
         thread_id=thread_id,
         role="user",

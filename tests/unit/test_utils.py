@@ -19,7 +19,6 @@ from azure.cosmos.agent_memory._utils import (
     extract_keywords,
     normalize_ai_foundry_endpoint,
     vector_order_direction,
-    vector_similarity_at_least,
 )
 from azure.cosmos.agent_memory.exceptions import ConfigurationError, ValidationError
 
@@ -233,21 +232,6 @@ def test_vector_order_direction_per_function():
     assert vector_order_direction("dotproduct") == "DESC"
     # euclidean: lower distance == more similar -> ASC for nearest-first.
     assert vector_order_direction("euclidean") == "ASC"
-
-
-def test_vector_similarity_at_least_cosine_and_dotproduct():
-    # Higher score is more similar; threshold is a floor.
-    for fn in ("cosine", "dotproduct"):
-        assert vector_similarity_at_least(0.97, 0.97, fn) is True
-        assert vector_similarity_at_least(0.99, 0.97, fn) is True
-        assert vector_similarity_at_least(0.80, 0.97, fn) is False
-
-
-def test_vector_similarity_at_least_euclidean_inverts():
-    # Lower distance is more similar; threshold is a ceiling.
-    assert vector_similarity_at_least(0.10, 0.20, "euclidean") is True
-    assert vector_similarity_at_least(0.20, 0.20, "euclidean") is True
-    assert vector_similarity_at_least(0.50, 0.20, "euclidean") is False
 
 
 def test_distance_function_from_container_properties_reads_policy():
