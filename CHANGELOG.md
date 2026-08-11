@@ -1,32 +1,32 @@
 ## Release History
 
-## [0.3.0b1] (Unreleased)
+## [0.3.0b2] (Unreleased)
 
 #### Features Added
 * Episodic memory is now a first-class memory type. Bounded experiences are segmented from the turn stream at idle-gap, topic-drift, and max-size boundaries, each captured as an `EpisodicRecord` with a summary, timeline events, an optional outcome, and first-class `lessons`. See [PR:#37](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/37)
 * `search_cosmos(include_episodes=True)` blends facts and episodes into a single ranked query sharing one `top_k` budget, and `search_episodic_memories()` searches episodes directly. See [PR:#37](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/37)
 * Fact extraction now defaults to the higher-recall v2 prompt (`extract_memories-v2.prompty`); set `AMT_EXTRACT_MEMORIES_PROMPT=extract_memories.prompty` to fall back to v1. See [PR:#37](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/37)
-* Procedural memory is now an atomic, retrievable skill and policy library. `ProceduralRecord` stores individual procedures (behavioral policies, workflows, decision rules, tool-usage notes, recovery strategies) with scope, activation conditions, steps, status, and source provenance. New `retrieve_procedures()` does context-aware semantic retrieval, and `build_procedural_context(user_id, task=...)` compiles the personalized system prompt as a deterministic projection of the active, in-scope procedures. Provenance gating keeps explicit user instructions, observed preferences, and organization policy `active` while episode-distilled, document, and inferred procedures stay `candidate` and are excluded from the compiled prompt.
-* The Durable Functions backend now runs episodic extraction, driven by the Cosmos DB change feed on a per-thread cadence set via `EPISODE_EVAL_EVERY_N` (with `EPISODE_IDLE_GAP_SECONDS`, `EPISODE_TOPIC_DRIFT`, `EPISODE_MAX_TURNS`, and `EPISODE_MIN_TURNS` mirrored on the Functions side).
-* New delete helpers on both clients: `delete_turn()`, `delete_thread_summary()`, `delete_user_summary()`, and bulk `delete_thread()` (removes a thread's turns and, by default, its summary; distilled facts, episodes, and procedures are left intact).
+* Procedural memory is now an atomic, retrievable skill and policy library. `ProceduralRecord` stores individual procedures (behavioral policies, workflows, decision rules, tool-usage notes, recovery strategies) with scope, activation conditions, steps, status, and source provenance. See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
+* The Durable Functions backend now runs episodic extraction, driven by the Cosmos DB change feed on a per-thread cadence set via `EPISODE_EVAL_EVERY_N` (with `EPISODE_IDLE_GAP_SECONDS`, `EPISODE_TOPIC_DRIFT`, `EPISODE_MAX_TURNS`, and `EPISODE_MIN_TURNS` mirrored on the Functions side). See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
+* New delete helpers on both clients: `delete_turn()`, `delete_thread_summary()`, `delete_user_summary()`, and bulk `delete_thread()` (removes a thread's turns and, by default, its summary; distilled facts, episodes, and procedures are left intact). See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
 
 #### Breaking Changes
-* The default fact-extraction cadence is now every 2 turns (`FACT_EXTRACTION_EVERY_N=2`) instead of every turn, across the SDK, and the Functions deploy default.
-* `add_cosmos()` is renamed to `upsert_memory()` on both clients and the store; behavior is unchanged (write-or-replace by id).
-* `delete_cosmos()` is renamed to `delete_memory()`.
-* Procedural memory has been reshaped: `ProceduralRecord` is now an atomic procedure rather than a single compiled system-prompt document, and the compiled prompt is produced on demand by `build_procedural_context()`. Pre-existing single-prompt procedural documents from earlier betas are not migrated.
-* Write-time vector deduplication (in-place fold) has been removed, along with the `DEDUP_VECTOR_ENABLED` and similarity-threshold knobs. Fact dedup is now in-batch hash plus deterministic-id create/409; contradiction reconciliation is unchanged.
+* The default fact-extraction cadence is now every 2 turns (`FACT_EXTRACTION_EVERY_N=2`) instead of every turn, across the SDK, and the Functions deploy default. See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
+* `add_cosmos()` is renamed to `upsert_memory()` on both clients and the store; behavior is unchanged (write-or-replace by id). See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
+* `delete_cosmos()` is renamed to `delete_memory()`. See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
+* Procedural memory has been reshaped: `ProceduralRecord` is now an atomic procedure rather than a single compiled system-prompt document, and the compiled prompt is produced on demand by `build_procedural_context()`. Pre-existing single-prompt procedural documents from earlier betas are not migrated. See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
+* Write-time vector deduplication (in-place fold) has been removed, along with the `DEDUP_VECTOR_ENABLED` and similarity-threshold knobs. Fact dedup is now in-batch hash plus deterministic-id create/409; contradiction reconciliation is unchanged. See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
 
 #### Bugs Fixed
 * Episode extraction now isolates LLM failures: a transient error leaves the open segment un-stamped for retry, while a non-retryable error (content filter, context-length) quarantines the segment so it can neither wedge the thread nor grow it without bound. See [PR:#37](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/37)
 * Out-of-range or non-numeric fact `salience` / `confidence` values are clamped instead of aborting the whole extraction batch and stalling the fact watermark. See [PR:#37](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/37)
 * Segment time bounds and the open-episode-segment loader now order turns chronologically by parsed timestamp, so mixed UTC offsets and tied timestamps no longer invert episode bounds or destabilize the deterministic episode id. See [PR:#37](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/37)
-* Per-turn extraction watermarks are stamped with a single-field conditional patch, so concurrent fact and episode writers no longer clobber each other's watermark field.
+* Per-turn extraction watermarks are stamped with a single-field conditional patch, so concurrent fact and episode writers no longer clobber each other's watermark field. See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
 * `parse_llm_json` now rejects a non-object JSON root with a typed error instead of letting it surface downstream as a misclassified transient failure. See [PR:#37](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/37)
 * Threshold environment values of `NaN` / `inf` are rejected instead of silently disabling the affected boundary. See [PR:#37](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/37)
 
 #### Other Changes
-* Fact hash-dedup no longer issues a per-extraction query to preload the user's existing fact hashes; exact duplicates are caught in-batch and by the deterministic-id create (409), reducing per-turn latency.
+* Fact hash-dedup no longer issues a per-extraction query to preload the user's existing fact hashes; exact duplicates are caught in-batch and by the deterministic-id create (409), reducing per-turn latency. See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
 
 ## [0.3.0b1] (2026-07-24)
 
