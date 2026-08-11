@@ -1006,27 +1006,58 @@ class AsyncPipelineService:
         """Advance the episodic watermark to ``last_turn``, never backwards
         (mirror of the sync helper): a single-doc write that cannot partially
         fail and never touches the change-feed-monitored turns container. The
-        monotonic read-check stops a late, out-of-order concurrent orchestration
-        from regressing the cursor and duplicating episodes under topic drift."""
+        advance is atomic - ETag ``IfNotModified`` with a re-read retry - so a
+        late, out-of-order concurrent orchestration cannot regress the cursor and
+        duplicate episodes under topic drift."""
+        from azure.core import MatchConditions
+        from azure.cosmos.exceptions import CosmosAccessConditionFailedError
+
         last_at = str(last_turn.get("created_at") or "")
         last_id = str(last_turn.get("id") or "")
         if not last_at:
             return
-        cur_at, cur_id = await self._read_episode_cursor(user_id, thread_id)
-        if (last_at, last_id) <= (cur_at, cur_id):
-            return
-        await self._upsert_item(
-            self._memories_container,
-            body={
-                "id": self._episode_cursor_id(user_id, thread_id),
+        cursor_id = self._episode_cursor_id(user_id, thread_id)
+        partition_key = [user_id, thread_id]
+        for _ in range(3):
+            etag: Optional[str] = None
+            try:
+                existing = await self._read_item(
+                    self._memories_container, item=cursor_id, partition_key=partition_key
+                )
+            except CosmosResourceNotFoundError:
+                existing = None
+            if existing is not None:
+                current = (
+                    str(existing.get("last_episode_at") or ""),
+                    str(existing.get("last_episode_id") or ""),
+                )
+                if (last_at, last_id) <= current:
+                    return  # monotonic: never regress
+                etag = existing.get("_etag")
+            body = {
+                "id": cursor_id,
                 "type": "episode_cursor",
                 "user_id": user_id,
                 "thread_id": thread_id,
                 "last_episode_at": last_at,
                 "last_episode_id": last_id,
                 "updated_at": datetime.now(tz=timezone.utc).isoformat(),
-            },
-        )
+            }
+            try:
+                if existing is None:
+                    await self._create_item(self._memories_container, body=body)
+                else:
+                    await self._replace_item(
+                        self._memories_container,
+                        item=cursor_id,
+                        body=body,
+                        etag=etag,
+                        match_condition=MatchConditions.IfNotModified,
+                    )
+                return
+            except (CosmosResourceExistsError, CosmosAccessConditionFailedError):
+                continue  # a concurrent run advanced first; re-read and re-check
+        logger.debug("episode cursor advance retries exhausted user_id=%s thread_id=%s", user_id, thread_id)
 
     async def _load_open_episode_segment(self, user_id: str, thread_id: str) -> list[dict[str, Any]]:
         """Return the open episode segment: turns created after the episodic

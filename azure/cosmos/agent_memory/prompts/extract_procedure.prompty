@@ -35,7 +35,7 @@ For each procedure produce ALL of these fields:
 - `scope_value`: the concrete scope (e.g. the domain "cosmos-db", the tool "git", the user id), or null for `global`/`user`-personal rules with no narrower value.
 - `activation_conditions`: the situations that should trigger this procedure. Non-empty for anything conditional.
 - `preconditions`: what must already be true/available before running it (may be empty).
-- `steps`: for `workflow` and `recovery_strategy`, the ordered steps (each with `sequence`, `instruction`, and optional `expected_result`, `on_failure`, `tool_name`). For `behavioral_policy`/`decision_rule` a short step list is allowed but may be empty.
+- `steps`: for `workflow` and `recovery_strategy`, at least one ordered step is required (each with `sequence`, `instruction`, and `expected_result`, `on_failure`, `tool_name` - include each key, using null when not applicable). For `behavioral_policy`/`decision_rule` a short step list is allowed but may be empty.
 - `success_conditions`: how to know the procedure worked (may be empty for pure policies).
 - `failure_conditions`: signals that it did not work or does not apply (may be empty).
 - `safety_constraints`: guardrails that must not be violated (may be empty).

@@ -48,6 +48,15 @@ def test_process_extract_episodes_returns_empty_result_without_old_warning(caplo
     assert OLD_EPISODIC_DURABLE_WARNING not in caplog.text
 
 
+def test_synthesize_procedural_is_noop():
+    # Durable procedural synthesis runs in the Function app after reconcile; the
+    # processor no-ops (rather than raising) so the in-process auto-trigger does
+    # not stamp a spurious failure each cadence.
+    proc = DurableFunctionProcessor()
+    result = proc.synthesize_procedural(user_id="u1")
+    assert result == {"status": "skipped", "procedures_created": 0}
+
+
 def test_client_extract_episodes_raises_for_durable_processor():
     client = CosmosMemoryClient(use_default_credential=False, processor=DurableFunctionProcessor())
     client._pipeline = MagicMock()

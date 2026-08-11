@@ -48,6 +48,15 @@ async def test_process_extract_episodes_returns_empty_result_without_old_warning
 
 
 @pytest.mark.asyncio
+async def test_synthesize_procedural_is_noop():
+    # Mirror of the sync processor: no-op (not raise) so the auto-trigger does
+    # not stamp a spurious failure each cadence.
+    proc = AsyncDurableFunctionProcessor()
+    result = await proc.synthesize_procedural(user_id="u1")
+    assert result == {"status": "skipped", "procedures_created": 0}
+
+
+@pytest.mark.asyncio
 async def test_client_extract_episodes_raises_for_durable_processor():
     client = AsyncCosmosMemoryClient(use_default_credential=False, processor=AsyncDurableFunctionProcessor())
     client._pipeline = MagicMock()

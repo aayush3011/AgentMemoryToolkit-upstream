@@ -63,10 +63,10 @@ await mem.push_to_cosmos()
 
 ```python
 # Update content of an existing memory
-await mem.update_cosmos(memory_id="<id>", content="Corrected message text")
+await mem.update_cosmos(memory_id="<id>", user_id="user-1", thread_id=THREAD_ID, memory_type="fact", content="Corrected message text")
 
-# Delete a memory (requires all partition key values)
-await mem.delete_memory(memory_id="<id>", user_id="user-1", thread_id=THREAD_ID)
+# Delete a memory (requires the partition keys and the memory_type)
+await mem.delete_memory(memory_id="<id>", user_id="user-1", thread_id=THREAD_ID, memory_type="fact")
 ```
 
 ---

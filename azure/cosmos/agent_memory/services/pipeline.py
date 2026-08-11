@@ -932,21 +932,37 @@ class PipelineService:
         folded), never backwards. A single-doc write: unlike the former per-turn
         stamp it cannot partially fail and leave the open segment torn, and it
         writes to the memories container, never the change-feed-monitored turns
-        container. The monotonic read-check stops a late, out-of-order concurrent
-        ``episode:{u}:{t}:{count}`` orchestration from regressing the cursor -
-        with topic drift enabled a regressed cursor would re-segment turns under a
-        new segment key and duplicate episodes.
+        container. The advance is atomic - ETag ``IfNotModified`` with a re-read
+        retry - so a late, out-of-order concurrent ``episode:{u}:{t}:{count}``
+        orchestration cannot regress the cursor (a regressed cursor would, with
+        topic drift enabled, re-segment turns under a new segment key and
+        duplicate episodes).
         """
+        from azure.core import MatchConditions
+        from azure.cosmos.exceptions import CosmosAccessConditionFailedError
+
         last_at = str(last_turn.get("created_at") or "")
         last_id = str(last_turn.get("id") or "")
         if not last_at:
             return
-        cur_at, cur_id = self._read_episode_cursor(user_id, thread_id)
-        if (last_at, last_id) <= (cur_at, cur_id):
-            return
-        self._memories_container.upsert_item(
-            body={
-                "id": self._episode_cursor_id(user_id, thread_id),
+        cursor_id = self._episode_cursor_id(user_id, thread_id)
+        partition_key = [user_id, thread_id]
+        for _ in range(3):
+            etag: Optional[str] = None
+            try:
+                existing = self._memories_container.read_item(item=cursor_id, partition_key=partition_key)
+            except CosmosResourceNotFoundError:
+                existing = None
+            if existing is not None:
+                current = (
+                    str(existing.get("last_episode_at") or ""),
+                    str(existing.get("last_episode_id") or ""),
+                )
+                if (last_at, last_id) <= current:
+                    return  # monotonic: never regress
+                etag = existing.get("_etag")
+            body = {
+                "id": cursor_id,
                 "type": "episode_cursor",
                 "user_id": user_id,
                 "thread_id": thread_id,
@@ -954,7 +970,20 @@ class PipelineService:
                 "last_episode_id": last_id,
                 "updated_at": datetime.now(tz=timezone.utc).isoformat(),
             }
-        )
+            try:
+                if existing is None:
+                    self._memories_container.create_item(body=body)
+                else:
+                    self._memories_container.replace_item(
+                        item=cursor_id,
+                        body=body,
+                        etag=etag,
+                        match_condition=MatchConditions.IfNotModified,
+                    )
+                return
+            except (CosmosResourceExistsError, CosmosAccessConditionFailedError):
+                continue  # a concurrent run advanced first; re-read and re-check
+        logger.debug("episode cursor advance retries exhausted user_id=%s thread_id=%s", user_id, thread_id)
 
     def _load_open_episode_segment(self, user_id: str, thread_id: str) -> list[dict[str, Any]]:
         """Return the open episode segment: turns created after the episodic

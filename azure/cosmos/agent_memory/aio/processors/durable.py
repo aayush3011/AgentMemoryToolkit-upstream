@@ -117,11 +117,13 @@ class AsyncDurableFunctionProcessor:
         user_id: str,
         force: bool = False,
     ) -> dict[str, Any]:
-        raise NotImplementedError(
-            "Procedural synthesis runs automatically after reconcile in durable mode; "
-            "manual invocation via the SDK is not supported when the Durable Function "
-            "app is the active processor."
-        )
+        # No-op, like the other durable hooks (mirror of the sync processor):
+        # procedural synthesis runs in the Durable Function app after reconcile,
+        # so returning instead of raising keeps the in-process auto-trigger from
+        # stamping a spurious failure each cadence.
+        del force
+        logger.debug("DurableFunctionProcessor.synthesize_procedural no-op user_id=%s", user_id)
+        return {"status": "skipped", "procedures_created": 0}
 
     async def close(self) -> None:
         logger.debug("AsyncDurableFunctionProcessor.close no-op")
