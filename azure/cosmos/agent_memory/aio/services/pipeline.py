@@ -1021,9 +1021,7 @@ class AsyncPipelineService:
         for _ in range(3):
             etag: Optional[str] = None
             try:
-                existing = await self._read_item(
-                    self._memories_container, item=cursor_id, partition_key=partition_key
-                )
+                existing = await self._read_item(self._memories_container, item=cursor_id, partition_key=partition_key)
             except CosmosResourceNotFoundError:
                 existing = None
             if existing is not None:
