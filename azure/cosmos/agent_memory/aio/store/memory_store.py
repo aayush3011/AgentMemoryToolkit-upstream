@@ -137,23 +137,23 @@ class AsyncMemoryStore:
         except Exception as exc:
             raise CosmosOperationError(f"{operation} failed: {exc}") from exc
 
-    async def add_cosmos(self, record: dict[str, Any]) -> dict[str, Any]:
+    async def upsert_memory(self, record: dict[str, Any]) -> dict[str, Any]:
         """Upsert a pre-built Cosmos memory document and return the stored body."""
         body = self._prepare_doc(record)
         memory_type = body.get("type")
         if memory_type not in _CONTAINER_FOR_TYPE:
             raise ValueError(
-                f"add_cosmos: record id={body.get('id')!r} has invalid type={memory_type!r}. "
-                f"Set 'type' to one of {sorted(_CONTAINER_FOR_TYPE)} before calling add_cosmos."
+                f"upsert_memory: record id={body.get('id')!r} has invalid type={memory_type!r}. "
+                f"Set 'type' to one of {sorted(_CONTAINER_FOR_TYPE)} before calling upsert_memory."
             )
         container = self._container_for_type(memory_type)
         try:
             response = await container.upsert_item(body=body)
         except Exception as exc:
             raise _wrap_cosmos_exception(
-                exc, message=f"async add_cosmos upsert failed for record {body.get('id')}: {exc}"
+                exc, message=f"async upsert_memory upsert failed for record {body.get('id')}: {exc}"
             ) from exc
-        logger.info("add_cosmos id=%s role=%s type=%s", body.get("id"), body.get("role"), body.get("type"))
+        logger.info("upsert_memory id=%s role=%s type=%s", body.get("id"), body.get("role"), body.get("type"))
         return response if isinstance(response, dict) else body
 
     async def add(
@@ -217,7 +217,7 @@ class AsyncMemoryStore:
                 body["embedding"] = await self._embeddings_client.generate(content)
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
-                    "add_cosmos: embedding generation failed for %s (%s); proceeding without embedding",
+                    "upsert_memory: embedding generation failed for %s (%s); proceeding without embedding",
                     record.id,
                     exc,
                 )
@@ -228,7 +228,7 @@ class AsyncMemoryStore:
             await container.upsert_item(body=body)
         except Exception as exc:
             raise _wrap_cosmos_exception(exc, message=f"Async upsert failed for record {record.id}: {exc}") from exc
-        logger.info("add_cosmos id=%s role=%s type=%s", record.id, role, memory_type)
+        logger.info("upsert_memory id=%s role=%s type=%s", record.id, role, memory_type)
         return record.id
 
     async def push(self, local_memory: list[dict[str, Any]], batch_size: int = 25) -> None:
@@ -1146,6 +1146,54 @@ class AsyncMemoryStore:
         """Build formatted context of relevant past experiences."""
         memories = await self.search_episodic(user_id, query, top_k=top_k)
         return format_episodic_context(memories)
+
+    async def retrieve_procedures(
+        self,
+        user_id: str,
+        search_terms: str,
+        top_k: int = 5,
+        *,
+        scope_type: Optional[str] = None,
+        scope_value: Optional[str] = None,
+        procedure_kind: Optional[str] = None,
+        status: Optional[str] = "active",
+        include_superseded: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Semantic search across procedural memories for a user."""
+        if not user_id:
+            raise ValidationError("user_id is required for retrieve_procedures")
+        terms = require_search_terms(search_terms)
+        top = top_literal(top_k, name="top_k")
+        query_vector = await self._embed(terms)
+        keywords = extract_keywords(terms)
+
+        qb = _QueryBuilder()
+        qb.add_filter("c.type", "@type", "procedural")
+        qb.add_filter("c.user_id", "@user_id", user_id)
+        qb.add_filter("c.scope_type", "@scope_type", scope_type)
+        qb.add_filter("c.scope_value", "@scope_value", scope_value)
+        qb.add_filter("c.procedure_kind", "@procedure_kind", procedure_kind)
+        qb.add_filter("c.status", "@status", status)
+
+        sql = build_search_sql(
+            qb=qb,
+            top=top,
+            keyword_count=len(keywords),
+            include_superseded=include_superseded,
+        )
+        parameters = qb.get_parameters()
+        parameters.append({"name": "@embedding", "value": query_vector})
+        for i, kw in enumerate(keywords):
+            parameters.append({"name": f"@kw{i}", "value": kw})
+
+        partition_key, _ = query_scope(user_id, None)
+        logger.debug("AsyncMemoryStore.retrieve_procedures query: %s", sql)
+        return await self.query(
+            sql,
+            parameters,
+            container_key=ContainerKey.MEMORIES,
+            partition_key=partition_key,
+        )
 
     async def _embed(self, text: str) -> list[float]:
         if self._embeddings_client is None:

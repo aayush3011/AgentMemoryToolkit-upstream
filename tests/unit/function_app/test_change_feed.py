@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 import triggers.change_feed as change_feed_module
-from azure.cosmos.exceptions import CosmosResourceNotFoundError
+from azure.cosmos.exceptions import CosmosHttpResponseError, CosmosResourceNotFoundError
 from triggers.change_feed import process_changefeed_batch
 
 
@@ -73,8 +73,18 @@ def _make_counter_container_starting_at(start_count: int = 0) -> MagicMock:
         state[body["id"]] = dict(body)
         return body
 
-    async def patch_item(*, item, partition_key, patch_operations):
+    async def patch_item(*, item, partition_key, patch_operations, filter_predicate=None):
         doc = state.setdefault(item, {"id": item})
+        if filter_predicate is not None:
+            # Honor the monotonic watermark guard: apply only when the new
+            # last_extract_count exceeds the stored one (else Cosmos returns 412).
+            new_val = next(
+                (op["value"] for op in patch_operations if op.get("path") == "/last_extract_count"),
+                None,
+            )
+            cur = doc.get("last_extract_count")
+            if new_val is not None and isinstance(cur, int) and cur >= new_val:
+                raise CosmosHttpResponseError(status_code=412, message="precondition failed")
         for op in patch_operations:
             doc[op["path"].lstrip("/")] = op["value"]
         return dict(doc)
@@ -164,6 +174,7 @@ def test_ensure_topology_is_idempotent():
     {
         "THREAD_SUMMARY_EVERY_N": "0",
         "FACT_EXTRACTION_EVERY_N": "0",
+        "EPISODE_EVAL_EVERY_N": "0",
         "USER_SUMMARY_EVERY_N": "0",
     },
     clear=False,
@@ -186,7 +197,7 @@ def test_all_disabled_skips_everything():
 
 def test_unset_thresholds_apply_documented_defaults(monkeypatch):
     """When env vars are unset, thresholds fall back to documented defaults
-    (fact=1, thread=10, user=20), not 0.
+    (fact=2, thread=10, user=20), not 0.
 
     Regression for the silent-no-op out-of-the-box deploy bug: a missing
     setting should NOT disable the orchestrator (only an explicit "0" does).
@@ -197,10 +208,10 @@ def test_unset_thresholds_apply_documented_defaults(monkeypatch):
     starter = _make_starter()
     container = _make_counter_container_starting_at()
 
-    # 1 turn => crosses fact extraction (n=1) only.
+    # 2 turns => crosses fact extraction (n=2) only.
     asyncio.run(
         process_changefeed_batch(
-            [_turn()],
+            [_turn(), _turn()],
             starter,
             counter_container=container,
         )
@@ -308,6 +319,7 @@ def test_turn_doc_missing_ids_is_skipped():
     {
         "THREAD_SUMMARY_EVERY_N": "4",
         "FACT_EXTRACTION_EVERY_N": "4",
+        "EPISODE_EVAL_EVERY_N": "4",
         "USER_SUMMARY_EVERY_N": "20",
     },
     clear=False,
@@ -329,8 +341,38 @@ def test_thread_threshold_crossing_starts_summary_and_extract():
     started = {(call.args[0], call.kwargs["instance_id"]) for call in starter.start_new.await_args_list}
     assert ("ThreadSummaryOrchestrator", "thread_summary:u1:t1:4") in started
     assert ("ExtractMemoriesOrchestrator", "extract:u1:t1:4") in started
+    assert ("ExtractEpisodesOrchestrator", "episode:u1:t1:4") in started
     # User threshold 20 not crossed by 4 turns.
     assert not any(name == "UserSummaryOrchestrator" for name, _ in started)
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "0",
+        "FACT_EXTRACTION_EVERY_N": "0",
+        "EPISODE_EVAL_EVERY_N": "4",
+        "USER_SUMMARY_EVERY_N": "0",
+    },
+    clear=False,
+)
+def test_episode_threshold_crossing_starts_extract_episodes():
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+
+    asyncio.run(
+        process_changefeed_batch(
+            [_turn() for _ in range(4)],
+            starter,
+            counter_container=container,
+        )
+    )
+
+    episode_calls = [c for c in starter.start_new.await_args_list if c.args[0] == "ExtractEpisodesOrchestrator"]
+    assert len(episode_calls) == 1
+    call = episode_calls[0]
+    assert call.kwargs["instance_id"] == "episode:u1:t1:4"
+    assert call.kwargs["client_input"] == {"user_id": "u1", "thread_id": "t1", "count": 4}
 
 
 @patch.dict(
@@ -374,6 +416,7 @@ def test_user_threshold_crossing_starts_user_summary():
     {
         "THREAD_SUMMARY_EVERY_N": "0",  # disabled
         "FACT_EXTRACTION_EVERY_N": "4",  # enabled
+        "EPISODE_EVAL_EVERY_N": "0",  # disabled
         "USER_SUMMARY_EVERY_N": "0",  # disabled
     },
     clear=False,
@@ -393,6 +436,33 @@ def test_disabled_thread_summary_does_not_start_summary_orchestrator():
 
     started = [call.args[0] for call in starter.start_new.await_args_list]
     assert started == ["ExtractMemoriesOrchestrator"]
+
+
+@patch.dict(
+    os.environ,
+    {
+        "THREAD_SUMMARY_EVERY_N": "0",
+        "FACT_EXTRACTION_EVERY_N": "4",
+        "EPISODE_EVAL_EVERY_N": "0",
+        "USER_SUMMARY_EVERY_N": "0",
+    },
+    clear=False,
+)
+def test_disabled_episode_does_not_start_extract_episodes():
+    starter = _make_starter()
+    container = _make_counter_container_starting_at()
+
+    asyncio.run(
+        process_changefeed_batch(
+            [_turn() for _ in range(4)],
+            starter,
+            counter_container=container,
+        )
+    )
+
+    started = [call.args[0] for call in starter.start_new.await_args_list]
+    assert "ExtractMemoriesOrchestrator" in started
+    assert "ExtractEpisodesOrchestrator" not in started
 
 
 @patch.dict(
@@ -646,6 +716,26 @@ def test_reconcile_flag_set_only_when_n_facts_times_n_dedup_threshold_crosses():
     assert payload.get("reconcile") is True
     assert payload.get("user_id") == "u1"
     assert payload.get("recent_k") == 1
+
+
+def test_advance_extract_watermark_is_monotonic():
+    """A later, out-of-order run must not regress the extract watermark below a
+    higher value a concurrent run already wrote (that would re-extract turns)."""
+    from shared.counters import advance_extract_watermark, thread_counter_id
+
+    container = _make_counter_container_starting_at()
+    cid = thread_counter_id("u1", "t1")
+
+    asyncio.run(advance_extract_watermark(container, cid, "u1", "t1", 8))
+    assert container._state[cid]["last_extract_count"] == 8
+
+    # An out-of-order run with a lower count is a no-op (Cosmos 412, swallowed).
+    asyncio.run(advance_extract_watermark(container, cid, "u1", "t1", 4))
+    assert container._state[cid]["last_extract_count"] == 8
+
+    # A higher count still advances.
+    asyncio.run(advance_extract_watermark(container, cid, "u1", "t1", 12))
+    assert container._state[cid]["last_extract_count"] == 12
 
 
 @patch.dict(

@@ -69,14 +69,29 @@ param embeddingDimensions int = 1536
 @description('Run thread-summary orchestration every N turns within a (user_id, thread_id). 0 = disabled.')
 param threadSummaryEveryN int = 10
 
-@description('Run extract-memories every N change-feed batches. Default 1 = run on every batch (matches SDK + local template). Bump for cost-sensitive production deployments.')
-param factExtractionEveryN int = 1
+@description('Run extract-memories every N turns within a (user_id, thread_id). Default 2 = extract every 2 turns (matches SDK + local template). Bump for cost-sensitive production deployments.')
+param factExtractionEveryN int = 2
 
 @description('Run dedup once per N fact-extraction batches. Effective cadence = factExtractionEveryN * dedupEveryN turns.')
 param dedupEveryN int = 5
 
 @description('Run user-summary orchestration every N turns from a given user_id across all threads. 0 = disabled.')
 param userSummaryEveryN int = 20
+
+@description('Evaluate an episode boundary every N turns within a (user_id, thread_id). 0 = disabled (no episodic memory).')
+param episodeEvalEveryN int = 4
+
+@description('Idle gap (seconds) between two consecutive turns that closes the open episode.')
+param episodeIdleGapSeconds int = 1800
+
+@description('Cosine drift from the open segment centroid past which a new turn closes the prior episode. 0 = disabled (idle-gap + max-size only).')
+param episodeTopicDrift string = '0'
+
+@description('Hard cap on turns in one open episode segment before a boundary is forced.')
+param episodeMaxTurns int = 40
+
+@description('Minimum turns before a natural (idle/drift) boundary may close an episode.')
+param episodeMinTurns int = 2
 
 @description('Maximum number of change-feed items processed per orchestration batch.')
 param maxBatchSize int = 20
@@ -193,6 +208,11 @@ module functions 'modules/functions.bicep' = if (deployFunctionApp) {
     factExtractionEveryN: factExtractionEveryN
     dedupEveryN: dedupEveryN
     userSummaryEveryN: userSummaryEveryN
+    episodeEvalEveryN: episodeEvalEveryN
+    episodeIdleGapSeconds: episodeIdleGapSeconds
+    episodeTopicDrift: episodeTopicDrift
+    episodeMaxTurns: episodeMaxTurns
+    episodeMinTurns: episodeMinTurns
     maxBatchSize: maxBatchSize
     memoryProcessorOwner: memoryProcessorOwner
     tags: commonTags

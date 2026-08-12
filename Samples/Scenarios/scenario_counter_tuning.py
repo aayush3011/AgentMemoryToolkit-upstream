@@ -76,7 +76,7 @@ def main() -> None:
     ]
     print(f"Writing {len(transcript)} turns to Cosmos (thread={thread_id})...")
     for role, content in transcript:
-        client.add_cosmos(
+        client.upsert_memory(
             user_id=user_id,
             thread_id=thread_id,
             role=role,

@@ -128,7 +128,7 @@ def run_demo() -> None:
         "User prefers NoSQL databases for their current project",
     ]
     for fact in facts:
-        mem.add_cosmos(
+        mem.upsert_memory(
             user_id=user_id,
             role="system",
             content=fact,
@@ -145,7 +145,7 @@ def run_demo() -> None:
         ("agent", "Azure Cosmos DB with its NoSQL API would be a great fit."),
     ]
     for role, content in conversation:
-        mem.add_cosmos(
+        mem.upsert_memory(
             user_id=user_id,
             role=role,
             content=content,
@@ -261,7 +261,7 @@ def run_demo() -> None:
 
     turns = mem.get_thread(thread_id=thread_id, user_id=user_id)
     for item in turns:
-        mem.delete_cosmos(
+        mem.delete_memory(
             memory_id=item["id"],
             user_id=user_id,
             thread_id=item.get("thread_id", thread_id),
@@ -269,7 +269,7 @@ def run_demo() -> None:
         )
     stored = mem.get_memories(user_id=user_id, thread_id=thread_id)
     for item in stored:
-        mem.delete_cosmos(
+        mem.delete_memory(
             memory_id=item["id"],
             user_id=user_id,
             thread_id=item.get("thread_id", thread_id),

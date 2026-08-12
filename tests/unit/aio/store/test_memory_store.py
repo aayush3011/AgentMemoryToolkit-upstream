@@ -324,7 +324,7 @@ async def test_search_adds_created_time_range_filters():
     assert params["@created_before"] == "2026-03-01T00:00:00+00:00"
 
 
-async def test_add_cosmos_routes_by_type():
+async def test_upsert_memory_routes_by_type():
     turns = MagicMock()
     memories = MagicMock()
     summaries = MagicMock()
@@ -333,7 +333,7 @@ async def test_add_cosmos_routes_by_type():
     store = AsyncMemoryStore(containers=_containers(turns=turns, memories=memories, summaries=summaries))
 
     for memory_type in ("turn", "fact", "episodic", "procedural", "thread_summary", "user_summary"):
-        await store.add_cosmos(_doc(id=f"{memory_type}_id", type=memory_type))
+        await store.upsert_memory(_doc(id=f"{memory_type}_id", type=memory_type))
 
     assert turns.upsert_item.await_count == 1
     assert memories.upsert_item.await_count == 3

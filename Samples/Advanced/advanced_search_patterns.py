@@ -74,7 +74,7 @@ def seed_memories(mem: CosmosMemoryClient, user_id: str, thread_id: str) -> None
 
     print("Seeding memories …")
     for entry in entries:
-        mem.add_cosmos(
+        mem.upsert_memory(
             user_id=user_id,
             role=entry["role"],
             content=entry["content"],

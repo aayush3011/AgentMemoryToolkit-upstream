@@ -75,7 +75,7 @@ def main() -> None:
         ("agent", "FastAPI is a great choice - fast, type-safe, async-native."),
         ("user", "Last quarter I tried doing this with Pinecone and the costs blew up."),
     ]:
-        mem.add_cosmos(user_id=user_id, role=role, content=content, thread_id=thread_id)
+        mem.upsert_memory(user_id=user_id, role=role, content=content, thread_id=thread_id)
     _print_memories(mem, user_id, thread_id)
 
     _header(2, "Extract structured memories (facts / procedural / episodic)")
@@ -93,7 +93,7 @@ def main() -> None:
     _header(5, "Archive: delete raw turns, keep derived memories")
     deleted = 0
     for m in mem.get_thread(thread_id=thread_id, user_id=user_id):
-        mem.delete_cosmos(memory_id=m["id"], user_id=user_id, thread_id=thread_id, memory_type="turn")
+        mem.delete_memory(memory_id=m["id"], user_id=user_id, thread_id=thread_id, memory_type="turn")
         deleted += 1
     print(f"  deleted {deleted} raw turn(s)")
 

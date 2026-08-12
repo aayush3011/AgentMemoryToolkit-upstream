@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import asyncio
 import time
-import uuid
 
 import pytest
 
@@ -85,7 +84,7 @@ async def _async_add_turns(
     turns: list[tuple[str, str]],
 ) -> None:
     for role, content in turns:
-        await mem.add_cosmos(
+        await mem.upsert_memory(
             user_id=user_id,
             role=role,
             content=content,
@@ -134,7 +133,7 @@ async def _async_seed_fact_with_embedding(
     check = "SELECT c.id FROM c WHERE c.user_id = @uid AND c.content = @content AND IS_DEFINED(c.embedding)"
     params = [{"name": "@uid", "value": user_id}, {"name": "@content", "value": content}]
     for _ in range(retries):
-        await mem.add_cosmos(
+        await mem.upsert_memory(
             user_id=user_id,
             role="user",
             content=content,
@@ -217,53 +216,5 @@ class TestAsyncEndToEnd:
                 top_k=5,
             )
             assert len(results) >= 1, "Async search should return at least one result"
-        finally:
-            await _async_cleanup(mem, unique_user_id)
-
-    async def test_dedup_extracted_memories_flags_near_duplicate_of_stored_fact(
-        self,
-        async_agent_memory,
-        unique_user_id,
-        unique_thread_id,
-    ):
-        """Async extract-time vector floor drops/tags a near-duplicate fact.
-
-        Parity check with the sync ``TestExtractTimeVectorDedup`` - guards the
-        async ``dedup_extracted_memories`` mirror (``_vector_candidates`` +
-        similarity bands) against a live backend. Driven with a controlled
-        near-duplicate (no LLM variance) so the assertion is deterministic.
-        """
-        mem = async_agent_memory
-        try:
-            await _async_seed_fact_with_embedding(
-                mem, unique_user_id, unique_thread_id, "The user has a cat named Whiskers."
-            )
-            await _async_wait_vector_searchable(mem, unique_user_id, "cat named Whiskers")
-
-            extracted = {
-                "facts": [
-                    {
-                        "id": f"fact_{uuid.uuid4().hex}",
-                        "type": "fact",
-                        "user_id": unique_user_id,
-                        "thread_id": unique_thread_id,
-                        "content": "The user's cat is called Whiskers.",
-                        "tags": [],
-                    }
-                ],
-                "episodic": [],
-                "updates": [],
-            }
-            result = await mem._get_pipeline().dedup_extracted_memories(unique_user_id, extracted)
-
-            stats = next((op for op in result.get("updates", []) if op.get("op") == "stats"), {})
-            suppressed = int(stats.get("vector_dedup_skipped", 0)) + int(stats.get("dup_candidates_tagged", 0))
-            surviving = result.get("facts", [])
-            was_dropped = len(surviving) == 0
-            was_tagged = any("sys:dup-candidate" in (f.get("tags") or []) for f in surviving)
-            assert suppressed >= 1 and (was_dropped or was_tagged), (
-                "Async vector floor should drop or tag the near-duplicate of the stored "
-                f"'cat named Whiskers' fact; surviving={surviving} stats={stats}"
-            )
         finally:
             await _async_cleanup(mem, unique_user_id)

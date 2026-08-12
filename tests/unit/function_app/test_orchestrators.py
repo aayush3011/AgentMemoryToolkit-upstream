@@ -193,7 +193,6 @@ class TestExtractMemoriesOrchestrator:
             gen,
             [
                 {"facts": [{"id": "f1"}], "episodic": [], "updates": []},
-                {"facts": [{"id": "f1", "deduped": True}], "episodic": [], "updates": []},
                 {
                     "fact_count": 2,
                     "episodic_count": 0,
@@ -202,14 +201,10 @@ class TestExtractMemoriesOrchestrator:
             ],
         )
 
-        assert [c[0] for c in ctx._yielded_calls] == ["em_Extract", "em_Dedup", "em_Persist"]
+        assert [c[0] for c in ctx._yielded_calls] == ["em_Extract", "em_Persist"]
         assert ctx._yielded_calls[1][2] == {
             "user_id": "u1",
             "extracted": {"facts": [{"id": "f1"}], "episodic": [], "updates": []},
-        }
-        assert ctx._yielded_calls[2][2] == {
-            "user_id": "u1",
-            "extracted": {"facts": [{"id": "f1", "deduped": True}], "episodic": [], "updates": []},
         }
         assert result["persisted"] is True
         assert result["extracted"]["fact_count"] == 2
@@ -223,7 +218,6 @@ class TestExtractMemoriesOrchestrator:
             gen,
             [
                 {"facts": [{"id": "f1"}], "episodic": [], "updates": []},
-                {"facts": [{"id": "f1"}], "episodic": [], "updates": []},
                 {"fact_count": 2, "episodic_count": 0, "updated_count": 0},
                 {
                     "fact": {"kept": 0, "merged": 1, "contradicted": 0},
@@ -234,8 +228,8 @@ class TestExtractMemoriesOrchestrator:
         )
 
         names = [c[0] for c in ctx._yielded_calls]
-        assert names == ["em_Extract", "em_Dedup", "em_Persist", "em_ReconcileMemories"]
-        assert ctx._yielded_calls[3][2] == {"user_id": "u1"}
+        assert names == ["em_Extract", "em_Persist", "em_ReconcileMemories"]
+        assert ctx._yielded_calls[2][2] == {"user_id": "u1"}
         assert [s[0] for s in ctx._yielded_sub_orchestrators] == [
             "SynthesizeProceduralOrchestrator",
         ]
@@ -261,13 +255,11 @@ class TestExtractMemoriesOrchestrator:
         gen = self._orchestrator()(ctx)
         # Yield 1: em_Extract
         gen.send(None)
-        # Yield 2: em_Dedup
+        # Yield 2: em_Persist
         gen.send({"facts": [{"id": "f1"}], "episodic": [], "updates": []})
-        # Yield 3: em_Persist
-        gen.send({"facts": [{"id": "f1"}], "episodic": [], "updates": []})
-        # Yield 4: em_ReconcileMemories
+        # Yield 3: em_ReconcileMemories
         gen.send({"fact_count": 2, "episodic_count": 0, "updated_count": 0})
-        # Yield 5: SynthesizeProceduralOrchestrator - throw an exception
+        # Yield 4: SynthesizeProceduralOrchestrator - throw an exception
         gen.send(
             {
                 "fact": {"kept": 0, "merged": 1, "contradicted": 0},
@@ -296,12 +288,11 @@ class TestExtractMemoriesOrchestrator:
             gen,
             [
                 {"facts": [], "episodic": [], "updates": []},
-                {"facts": [], "episodic": [], "updates": []},
                 {"fact_count": 0, "episodic_count": 0, "updated_count": 0},
             ],
         )
 
-        assert [c[0] for c in ctx._yielded_calls] == ["em_Extract", "em_Dedup", "em_Persist"]
+        assert [c[0] for c in ctx._yielded_calls] == ["em_Extract", "em_Persist"]
         assert ctx._yielded_sub_orchestrators == []
         assert result["procedural"] is None
 
@@ -309,7 +300,7 @@ class TestExtractMemoriesOrchestrator:
     def test_extract_payload_carries_user_thread_without_recent_k_when_absent(self, _retry):
         ctx = _make_context({"user_id": "u", "thread_id": "t"})
         gen = self._orchestrator()(ctx)
-        _drive(gen, [{"facts": []}, {"facts": []}, {"fact_count": 0}])
+        _drive(gen, [{"facts": []}, {"fact_count": 0}])
 
         extract_payload = ctx._yielded_calls[0][2]
         assert extract_payload == {"user_id": "u", "thread_id": "t"}
@@ -318,21 +309,19 @@ class TestExtractMemoriesOrchestrator:
     def test_extract_payload_carries_recent_k_when_provided(self, _retry):
         ctx = _make_context({"user_id": "u", "thread_id": "t", "recent_k": 7})
         gen = self._orchestrator()(ctx)
-        _drive(gen, [{"facts": []}, {"facts": []}, {"fact_count": 0}])
+        _drive(gen, [{"facts": []}, {"fact_count": 0}])
 
         extract_payload = ctx._yielded_calls[0][2]
         assert extract_payload == {"user_id": "u", "thread_id": "t", "recent_k": 7}
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
-    def test_dedup_output_flows_to_persist(self, _retry):
+    def test_extract_output_flows_to_persist(self, _retry):
         extracted = {"facts": [{"id": "f1"}], "episodic": [], "updates": []}
-        deduped = {"facts": [{"id": "f1", "embedding": [0.1]}], "episodic": [], "updates": []}
         ctx = _make_context({"user_id": "u", "thread_id": "t"})
         gen = self._orchestrator()(ctx)
-        _drive(gen, [extracted, deduped, {"fact_count": 1}])
+        _drive(gen, [extracted, {"fact_count": 1}])
 
         assert ctx._yielded_calls[1][2] == {"user_id": "u", "extracted": extracted}
-        assert ctx._yielded_calls[2][2] == {"user_id": "u", "extracted": deduped}
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
     def test_activity_failure_propagates(self, _retry):
@@ -346,17 +335,17 @@ class TestExtractMemoriesOrchestrator:
     def test_advance_watermark_after_persist_when_count_present(self, _retry):
         ctx = _make_context({"user_id": "u1", "thread_id": "t1", "count": 42})
         gen = self._orchestrator()(ctx)
-        _drive(gen, [{"facts": []}, {"facts": []}, {"fact_count": 0}, True])
+        _drive(gen, [{"facts": []}, {"fact_count": 0}, True])
 
         names = [c[0] for c in ctx._yielded_calls]
-        assert names == ["em_Extract", "em_Dedup", "em_Persist", "em_AdvanceExtractWatermark"]
-        assert ctx._yielded_calls[3][2] == {"user_id": "u1", "thread_id": "t1", "count": 42}
+        assert names == ["em_Extract", "em_Persist", "em_AdvanceExtractWatermark"]
+        assert ctx._yielded_calls[2][2] == {"user_id": "u1", "thread_id": "t1", "count": 42}
 
     @patch.object(em_mod, "default_retry_options", return_value=MagicMock())
     def test_no_watermark_advance_when_count_absent(self, _retry):
         ctx = _make_context({"user_id": "u1", "thread_id": "t1"})
         gen = self._orchestrator()(ctx)
-        _drive(gen, [{"facts": []}, {"facts": []}, {"fact_count": 0}])
+        _drive(gen, [{"facts": []}, {"fact_count": 0}])
         names = [c[0] for c in ctx._yielded_calls]
         assert "em_AdvanceExtractWatermark" not in names
 
@@ -392,28 +381,6 @@ class TestExtractMemoryActivities:
             em_mod.em_Extract({"user_id": "u1", "thread_id": "t1"})
 
         pipeline.extract_memories_durable.assert_called_once_with(user_id="u1", thread_id="t1", recent_k=20)
-
-    def test_em_dedup_delegates_to_pipeline_and_returns_deduped_dict(self):
-        extracted = {"facts": [{"id": "f1"}], "episodic": [], "updates": []}
-        deduped = {"facts": [{"id": "f1", "embedding": [0.1]}], "episodic": [], "updates": []}
-        pipeline = MagicMock()
-        pipeline.dedup_extracted_memories.return_value = deduped
-
-        with patch.object(em_mod, "get_pipeline", return_value=pipeline):
-            result = em_mod.em_Dedup({"user_id": "u1", "extracted": extracted})
-
-        pipeline.dedup_extracted_memories.assert_called_once_with(user_id="u1", extracted=extracted)
-        assert result == deduped
-
-    def test_em_dedup_falls_back_to_input_when_pipeline_returns_none(self):
-        extracted = {"facts": [], "episodic": [], "updates": []}
-        pipeline = MagicMock()
-        pipeline.dedup_extracted_memories.return_value = None
-
-        with patch.object(em_mod, "get_pipeline", return_value=pipeline):
-            result = em_mod.em_Dedup({"user_id": "u1", "extracted": extracted})
-
-        assert result is extracted
 
     def test_em_reconcile_memories_reconciles_fact_and_episodic(self):
         pipeline = MagicMock()

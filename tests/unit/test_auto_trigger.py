@@ -1,8 +1,8 @@
 """Tests for the InProcess push_to_cosmos auto-trigger.
 
-Per-turn fact extraction is the new default (FACT_EXTRACTION_EVERY_N=1):
-each turn flushed to Cosmos should immediately fire `process_thread` for
-the in-process backend. The durable backend must remain a no-op (the
+These tests set `FACT_EXTRACTION_EVERY_N=1` for per-turn extraction: each
+turn flushed to Cosmos should immediately fire `process_thread` for the
+in-process backend. The durable backend must remain a no-op (the
 change-feed function app handles it).
 """
 

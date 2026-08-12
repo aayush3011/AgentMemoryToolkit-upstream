@@ -54,7 +54,7 @@ def main() -> None:
         ("agent", "HPK lets you co-locate related items for efficient queries."),
     ]
     for role, content in transcript:
-        client.add_cosmos(
+        client.upsert_memory(
             user_id=user_id,
             thread_id=thread_id,
             role=role,

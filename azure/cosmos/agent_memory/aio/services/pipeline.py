@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
+import re
 import time
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -22,24 +23,22 @@ from azure.cosmos.exceptions import (
     CosmosResourceExistsError,
     CosmosResourceNotFoundError,
 )
+from pydantic import ValidationError as PydanticValidationError
 
 from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory._utils import (
     DEFAULT_TTL_BY_TYPE,
     compute_content_hash,
     distance_function_from_container_properties,
-    vector_autodrop_supported,
     vector_order_direction,
-    vector_similarity_at_least,
 )
 from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
 from azure.cosmos.agent_memory.exceptions import (
-    LLMError,
-    MemoryConflictError,
     ValidationError,
 )
 from azure.cosmos.agent_memory.logging import get_logger
 from azure.cosmos.agent_memory.models import (
+    TRUSTED_PROCEDURE_SOURCE_KINDS,
     EpisodicRecord,
     FactRecord,
     ProceduralRecord,
@@ -73,13 +72,8 @@ from azure.cosmos.agent_memory.services._pipeline_helpers import (
 from azure.cosmos.agent_memory.services._pipeline_helpers import (
     is_real_number as _is_real_number,
 )
-from azure.cosmos.agent_memory.services._pipeline_helpers import (
-    max_or_none as _max_or_none,
-)
 from azure.cosmos.agent_memory.store._search_helpers import top_literal
 from azure.cosmos.agent_memory.thresholds import (
-    get_dedup_sim_high,
-    get_dedup_vector_enabled,
     get_episode_idle_gap_seconds,
     get_episode_max_turns,
     get_episode_min_turns,
@@ -168,8 +162,43 @@ class _AsyncStoreContainerAdapter:
             if inspect.isawaitable(response):
                 response = await response
             return response if isinstance(response, dict) else body
-        response = await self._store.add_cosmos(body)
+        response = await self._store.upsert_memory(body)
         return response if isinstance(response, dict) else body
+
+    @staticmethod
+    def _apply_patch_operations(doc: dict[str, Any], patch_operations: list[dict[str, Any]]) -> dict[str, Any]:
+        patched = dict(doc)
+        for operation in patch_operations:
+            if operation.get("op") != "set":
+                raise ValueError(f"unsupported patch operation: {operation.get('op')!r}")
+            path = operation.get("path")
+            if not isinstance(path, str) or not path.startswith("/") or path == "/":
+                raise ValueError(f"unsupported patch path: {path!r}")
+            keys = [part.replace("~1", "/").replace("~0", "~") for part in path[1:].split("/")]
+            target = patched
+            for key in keys[:-1]:
+                value = target.get(key)
+                if not isinstance(value, dict):
+                    value = {}
+                    target[key] = value
+                target = value
+            target[keys[-1]] = operation.get("value")
+        return patched
+
+    async def patch_item(
+        self, *, item: str, partition_key: Any, patch_operations: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        container = self._target_container()
+        patch_item = getattr(container, "patch_item", None)
+        if callable(patch_item):
+            response = patch_item(item=item, partition_key=partition_key, patch_operations=patch_operations)
+            if inspect.isawaitable(response):
+                response = await response
+            if isinstance(response, dict):
+                return response
+            return await self.read_item(item=item, partition_key=partition_key)
+        doc = await self.read_item(item=item, partition_key=partition_key)
+        return await self.upsert_item(body=self._apply_patch_operations(doc, patch_operations))
 
     async def create_item(self, *, body: dict[str, Any]) -> dict[str, Any]:
         container = self._target_container()
@@ -184,7 +213,7 @@ class _AsyncStoreContainerAdapter:
             if inspect.isawaitable(response):
                 response = await response
             return response if isinstance(response, dict) else body
-        response = await self._store.add_cosmos(body)
+        response = await self._store.upsert_memory(body)
         return response if isinstance(response, dict) else body
 
     async def replace_item(self, **kwargs: Any) -> Any:
@@ -307,17 +336,17 @@ class AsyncPipelineService:
             return
         self._warned_distance_policy_unavailable = True
         logger.warning(
-            "vector dedup: container vector policy could not be read; skipping in-place "
-            "near-duplicate folding this run to avoid mis-calibrated folds. Memories are "
-            "written as-is and deduped on a later run once the policy is readable."
+            "vector dedup: container vector policy could not be read; skipping "
+            "near-exact auto-drop this run to avoid mis-calibrated drops. Memories are "
+            "written as-is and reconciled on a later run once the policy is readable."
         )
 
     def _warn_euclidean_autodrop_once(self, distance_function: str) -> None:
         """One-shot WARN that the near-exact vector auto-drop is disabled.
 
-        The ``DEDUP_SIM_HIGH`` thresholds are cosine-calibrated; on euclidean
-        the destructive auto-drop is skipped (borderline tagging + LLM reconcile
-        still run). Logged once per pipeline instance to avoid hot-path spam.
+        The near-exact threshold is cosine-calibrated; on euclidean
+        the destructive auto-drop is skipped and LLM reconcile still runs.
+        Logged once per pipeline instance to avoid hot-path spam.
         """
         if getattr(self, "_warned_euclidean_autodrop", False):
             return
@@ -423,40 +452,6 @@ class AsyncPipelineService:
             include_timestamp=include_timestamp,
         )
 
-    async def _load_existing_memories(
-        self,
-        user_id: str,
-        memory_types: list[str],
-        limit: int = 100,
-    ) -> list[dict[str, Any]]:
-        """Query active (non-superseded) memories for reconciliation context.
-
-        Results are ordered by ``c._ts DESC`` so the most recently written
-        memories survive the cap - without ORDER BY, Cosmos returns rows
-        in implementation-defined order and the dedup comparison set is
-        non-deterministic.
-        """
-        type_placeholders = ", ".join(f"@mtype{i}" for i in range(len(memory_types)))
-        capped_limit = top_literal(limit, name="_load_existing_memories.limit")
-        query = (
-            f"SELECT TOP {capped_limit} * FROM c "
-            f"WHERE c.user_id = @user_id "
-            f"AND c.type IN ({type_placeholders}) "
-            f"AND {_ACTIVE_DOC_FILTER} "
-            f"ORDER BY c._ts DESC"
-        )
-        parameters: list[dict[str, Any]] = [
-            {"name": "@user_id", "value": user_id},
-        ]
-        for i, mt in enumerate(memory_types):
-            parameters.append({"name": f"@mtype{i}", "value": mt})
-
-        return await self._query_items(
-            self._memories_container,
-            query=query,
-            parameters=parameters,
-        )
-
     async def _upsert_memory(self, doc: dict[str, Any]) -> dict[str, Any]:
         """Upsert a fact, episodic, or procedural document to the memories container."""
         return await self._upsert_item(self._memories_container, body=doc)
@@ -547,17 +542,20 @@ class AsyncPipelineService:
             logger.warning("extract_memories_durable no memories found user_id=%s thread_id=%s", user_id, thread_id)
             return {"facts": [], "episodic": [], "updates": [], "processed_turn_docs": []}
 
-        existing_for_hash = await self._load_existing_memories(user_id, ["fact"])
-        existing_fact_hashes: set[str] = {
-            m["content_hash"] for m in existing_for_hash if m.get("type") == "fact" and m.get("content_hash")
-        }
+        # Exact-duplicate detection is in-batch only: a content_hash seen earlier
+        # in THIS extraction is skipped. Cross-turn / cross-run exact duplicates
+        # are handled at write time by the deterministic-id create (a repeat of
+        # the same fact collides on id and is skipped with a 409), so there is no
+        # per-extract query to preload the user's existing fact hashes.
+        existing_fact_hashes: set[str] = set()
 
         # Token-bounded, per-batch extraction. Each batch is an independent LLM
         # call, so a single poisoned turn fails only its own batch. Turns from
         # succeeded and quarantined (non-retryable, e.g. content-filter) batches
-        # go into ``processed_turns`` and are stamped ``extracted_at`` by persist
-        # so they are never re-processed; turns from batches that fail with a
-        # *retryable* error are left un-stamped and retried on the next run.
+        # go into ``processed_turns``; the in-process caller marks them
+        # ``extracted_at`` so they are never re-processed (the Durable backend
+        # instead advances a count-based watermark). Turns from batches that fail
+        # with a *retryable* error are left out and retried on the next run.
         batches = batch_turns_by_tokens(items, get_extraction_batch_max_tokens())
         facts: list[dict[str, Any]] = []
         processed_turns: list[dict[str, Any]] = []
@@ -681,200 +679,6 @@ class AsyncPipelineService:
         )
         return result
 
-    async def dedup_extracted_memories(self, user_id: str, extracted: dict) -> dict:
-        """Fold near-duplicate extracted docs into their existing canonical
-        memory *in place* (async mirror of the sync in-place dedup).
-        """
-        if not get_dedup_vector_enabled():
-            return extracted
-        if not user_id:
-            raise ValidationError("user_id is required")
-        if not isinstance(extracted, dict):
-            raise ValidationError("extracted must be a dict")
-
-        high = get_dedup_sim_high()
-        distance_function = await self._vector_distance_function()
-        read_failed = getattr(self, "_distance_function_read_failed", False)
-        similarity_ok = (not read_failed) and vector_autodrop_supported(distance_function)
-        if read_failed:
-            self._warn_distance_policy_unavailable_once()
-        elif not similarity_ok:
-            self._warn_euclidean_autodrop_once(distance_function)
-
-        result = {
-            "facts": [dict(doc) for doc in extracted.get("facts", [])],
-            "episodic": [dict(doc) for doc in extracted.get("episodic", [])],
-            "updates": [dict(op) for op in extracted.get("updates", [])],
-        }
-        # Carry through any non-bucket keys (e.g. ``processed_turn_docs``) so this
-        # transform never silently drops caller state.
-        for _carry_key, _carry_value in extracted.items():
-            if _carry_key not in result:
-                result[_carry_key] = _carry_value
-
-        docs = [doc for doc in result["facts"] + result["episodic"] if doc.get("content")]
-        # Similarity comparison is only meaningful for cosine/dotproduct; on a
-        # euclidean container we skip in-place folding and let everything ADD.
-        if not docs or not similarity_ok:
-            return result
-
-        missing_embeddings = [doc for doc in docs if not doc.get("embedding")]
-        if missing_embeddings:
-            embeddings = await self._embed_batch([str(doc["content"]) for doc in missing_embeddings])
-            for doc, embedding in zip(missing_embeddings, embeddings):
-                doc["embedding"] = embedding
-
-        inplace_updated = 0
-        folded_ids: set[str] = set()
-        updated_target_ids: set[str] = set()
-        for doc in docs:
-            doc_id = str(doc.get("id") or "")
-            memory_type = str(doc.get("type") or "")
-            embedding = doc.get("embedding") or []
-            if not doc_id or memory_type not in {"fact", "episodic"} or not embedding:
-                continue
-
-            neighbor, score = await self._nearest_active_full(
-                user_id=user_id,
-                embedding=embedding,
-                memory_type=memory_type,
-                exclude_ids={doc_id} | set(doc.get("supersedes_ids") or []),
-            )
-            if not neighbor or not vector_similarity_at_least(score, high, distance_function):
-                continue  # novel - leave in result for persist to ADD
-
-            neighbor_id = str(neighbor.get("id") or "")
-            if not neighbor_id:
-                continue
-            if neighbor_id in updated_target_ids:
-                folded_ids.add(doc_id)
-                continue
-            if await self._apply_inplace_update(neighbor, doc):
-                updated_target_ids.add(neighbor_id)
-                inplace_updated += 1
-                folded_ids.add(doc_id)
-
-        if folded_ids:
-            for bucket in ("facts", "episodic"):
-                result[bucket] = [d for d in result[bucket] if str(d.get("id") or "") not in folded_ids]
-        if inplace_updated:
-            result["updates"].append({"op": "stats", "inplace_updated": inplace_updated})
-        return result
-
-    async def _nearest_active_full(
-        self,
-        *,
-        user_id: str,
-        embedding: list[float],
-        memory_type: str,
-        exclude_ids: set[str],
-    ) -> tuple[Optional[dict[str, Any]], float]:
-        """Async mirror: nearest active same-type memory returned as a *full* doc."""
-        if not user_id or not embedding:
-            return None, 0.0
-        query = (
-            "SELECT TOP 5 c AS doc, VectorDistance(c.embedding, @vec) AS score "
-            "FROM c WHERE c.user_id = @user_id "
-            "AND c.type = @memory_type "
-            f"AND {_ACTIVE_DOC_FILTER} "
-            "AND IS_DEFINED(c.embedding) "
-            "ORDER BY VectorDistance(c.embedding, @vec)"
-        )
-        try:
-            rows = await self._query_items(
-                self._memories_container,
-                query=query,
-                parameters=[
-                    {"name": "@user_id", "value": user_id},
-                    {"name": "@memory_type", "value": memory_type},
-                    {"name": "@vec", "value": embedding},
-                ],
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("_nearest_active_full query failed user_id=%s err=%s", user_id, exc)
-            return None, 0.0
-        for row in rows:
-            doc = row.get("doc") or {}
-            rid = str(doc.get("id") or "")
-            if rid and rid not in exclude_ids:
-                return doc, float(row.get("score") or 0.0)
-        return None, 0.0
-
-    async def _apply_inplace_update(self, neighbor: dict[str, Any], new_doc: dict[str, Any]) -> bool:
-        """Async mirror of the sync in-place refresh (recency-wins content+embedding).
-
-        Folds only within the same ``metadata.source`` (user vs agent); a
-        cross-source pair returns False so the caller keeps it as a novel ADD,
-        preventing tag/source desync.
-        """
-        from azure.core import MatchConditions
-        from azure.cosmos.exceptions import CosmosAccessConditionFailedError
-
-        neighbor_source = (neighbor.get("metadata") or {}).get("source") or "user"
-        new_source = (new_doc.get("metadata") or {}).get("source") or "user"
-        if neighbor_source != new_source:
-            logger.info(
-                "in-place dedup update skipped (source mismatch neighbor=%s new=%s) "
-                "target_id=%s; keeping new doc as novel",
-                neighbor_source,
-                new_source,
-                neighbor.get("id"),
-            )
-            return False
-
-        try:
-            old_etag = neighbor.get("_etag")
-            updated = dict(neighbor)
-            for sys_prop in ("_rid", "_self", "_etag", "_attachments", "_ts"):
-                updated.pop(sys_prop, None)
-            new_content = str(new_doc.get("content") or "")
-            old_content = str(neighbor.get("content") or "")
-            if len(new_content) >= len(old_content):
-                updated["content"] = new_content
-                updated["content_hash"] = compute_content_hash(new_content)
-                if new_doc.get("embedding"):
-                    updated["embedding"] = new_doc["embedding"]
-            updated["updated_at"] = datetime.now(timezone.utc).isoformat()
-
-            new_sal = _max_or_none([neighbor.get("salience"), new_doc.get("salience")])
-            if new_sal is not None:
-                updated["salience"] = new_sal
-            new_conf = _max_or_none([neighbor.get("confidence"), new_doc.get("confidence")])
-            if new_conf is not None:
-                updated["confidence"] = new_conf
-
-            merged_tags: list[str] = []
-            for t in list(neighbor.get("tags") or []) + list(new_doc.get("tags") or []):
-                if t and t != "sys:dup-candidate" and t not in merged_tags:
-                    merged_tags.append(t)
-            if merged_tags:
-                updated["tags"] = merged_tags
-
-            if old_etag and hasattr(self._memories_container, "replace_item"):
-                await self._replace_item(
-                    self._memories_container,
-                    item=updated["id"],
-                    body=updated,
-                    match_condition=MatchConditions.IfNotModified,
-                    etag=old_etag,
-                )
-            else:
-                await self._upsert_item(self._memories_container, body=updated)
-            return True
-        except CosmosAccessConditionFailedError:
-            logger.info(
-                "in-place dedup update skipped (concurrent writer won) target_id=%s; keeping new doc as novel",
-                neighbor.get("id"),
-            )
-            return False
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "in-place dedup update failed target_id=%s err=%s (keeping new doc as novel)",
-                neighbor.get("id"),
-                exc,
-            )
-            return False
-
     async def persist_extracted_memories(
         self,
         user_id: str,
@@ -916,7 +720,7 @@ class AsyncPipelineService:
             if op.get("op") == "stats":
                 result["exact_dedup_skipped"] += int(op.get("exact_dedup_skipped") or 0)
                 result["dropped_episodic_count"] += int(op.get("dropped_episodic_count") or 0)
-                for key in ("inplace_updated", "deferred_turn_count", "quarantined_turn_count"):
+                for key in ("deferred_turn_count", "quarantined_turn_count"):
                     if key in op:
                         result[key] = result.get(key, 0) + int(op.get(key) or 0)
 
@@ -924,11 +728,11 @@ class AsyncPipelineService:
 
         return result
 
-    async def _mark_turns_extracted(self, turn_docs: list[dict[str, Any]], *, field: str = "extracted_at") -> int:
-        """Stamp a processed-watermark field on each turn doc and upsert. Mirror of
-        the sync helper - ``field`` selects the independent watermark
-        (``extracted_at`` for facts, ``episode_extracted_at`` for episodic
-        segmentation). Per-turn failures are logged but never raise.
+    async def _mark_turns_extracted(self, turn_docs: list[dict[str, Any]]) -> int:
+        """Stamp the fact-extraction ``extracted_at`` watermark on each turn doc
+        (mirror of the sync helper). Episodic segmentation uses a separate
+        per-thread cursor doc and never stamps turns. Per-turn failures are
+        logged but never raise.
         """
         if not turn_docs:
             return 0
@@ -939,14 +743,15 @@ class AsyncPipelineService:
             if not turn_id:
                 continue
             try:
-                doc_to_write = dict(turn)
-                doc_to_write[field] = now_iso
-                await self._upsert_item(self._turns_container, body=doc_to_write)
+                await self._turns_container.patch_item(
+                    item=turn_id,
+                    partition_key=[turn.get("user_id"), turn.get("thread_id")],
+                    patch_operations=[{"op": "set", "path": "/extracted_at", "value": now_iso}],
+                )
                 marked += 1
             except Exception as exc:
                 logger.warning(
-                    "_mark_turns_extracted(%s) failed for turn_id=%s err=%s (turn may be re-processed on next call)",
-                    field,
+                    "_mark_turns_extracted failed for turn_id=%s err=%s (turn may be re-processed on next call)",
                     turn_id,
                     exc,
                 )
@@ -964,11 +769,8 @@ class AsyncPipelineService:
         extracted = await self.extract_memories_durable(user_id, thread_id, recent_k, turns=turns)
         # Capture the processed turns from the compute stage as the single source of
         # truth for stamping. Stamping happens here (not inside persist) so no
-        # intermediate transform (e.g. dedup) can drop ``processed_turn_docs``
-        # and cause the same turns to be re-extracted forever.
+        # Persist uses this exact list for stamping after all creates finish.
         processed_turns = extracted.get("processed_turn_docs") or []
-        if get_dedup_vector_enabled():
-            extracted = await self.dedup_extracted_memories(user_id, extracted)
         counts = await self.persist_extracted_memories(user_id, extracted)
         if processed_turns:
             marked = await self._mark_turns_extracted(processed_turns)
@@ -1180,20 +982,101 @@ class AsyncPipelineService:
     def _deterministic_episode_id(segment_key: str, index: int) -> str:
         return deterministic_episode_id(segment_key, index)
 
+    @staticmethod
+    def _episode_cursor_id(user_id: str, thread_id: str) -> str:
+        return f"episode_cursor_{user_id}_{thread_id}"
+
+    async def _read_episode_cursor(self, user_id: str, thread_id: str) -> tuple[str, str]:
+        """``(created_at, id)`` watermark of the last turn folded into an episode,
+        or ``("", "")`` when none. Stored as a single doc in the MEMORIES
+        container so advancing it never writes to the turns container and cannot
+        re-enter the change feed (mirror of the sync helper). ``created_at`` is
+        UTC-normalized, so the lexical ``>`` comparison matches chronology."""
+        try:
+            doc = await self._read_item(
+                self._memories_container,
+                item=self._episode_cursor_id(user_id, thread_id),
+                partition_key=[user_id, thread_id],
+            )
+        except CosmosResourceNotFoundError:
+            return "", ""
+        return str(doc.get("last_episode_at") or ""), str(doc.get("last_episode_id") or "")
+
+    async def _advance_episode_cursor(self, user_id: str, thread_id: str, last_turn: dict[str, Any]) -> None:
+        """Advance the episodic watermark to ``last_turn``, never backwards
+        (mirror of the sync helper): a single-doc write that cannot partially
+        fail and never touches the change-feed-monitored turns container. The
+        advance is atomic - ETag ``IfNotModified`` with a re-read retry - so a
+        late, out-of-order concurrent orchestration cannot regress the cursor and
+        duplicate episodes under topic drift."""
+        from azure.core import MatchConditions
+        from azure.cosmos.exceptions import CosmosAccessConditionFailedError
+
+        last_at = str(last_turn.get("created_at") or "")
+        last_id = str(last_turn.get("id") or "")
+        if not last_at:
+            return
+        cursor_id = self._episode_cursor_id(user_id, thread_id)
+        partition_key = [user_id, thread_id]
+        for _ in range(3):
+            etag: Optional[str] = None
+            try:
+                existing = await self._read_item(self._memories_container, item=cursor_id, partition_key=partition_key)
+            except CosmosResourceNotFoundError:
+                existing = None
+            if existing is not None:
+                current = (
+                    str(existing.get("last_episode_at") or ""),
+                    str(existing.get("last_episode_id") or ""),
+                )
+                if (last_at, last_id) <= current:
+                    return  # monotonic: never regress
+                etag = existing.get("_etag")
+            body = {
+                "id": cursor_id,
+                "type": "episode_cursor",
+                "user_id": user_id,
+                "thread_id": thread_id,
+                "last_episode_at": last_at,
+                "last_episode_id": last_id,
+                "updated_at": datetime.now(tz=timezone.utc).isoformat(),
+            }
+            try:
+                if existing is None:
+                    await self._create_item(self._memories_container, body=body)
+                else:
+                    await self._replace_item(
+                        self._memories_container,
+                        item=cursor_id,
+                        body=body,
+                        etag=etag,
+                        match_condition=MatchConditions.IfNotModified,
+                    )
+                return
+            except (CosmosResourceExistsError, CosmosAccessConditionFailedError):
+                continue  # a concurrent run advanced first; re-read and re-check
+        logger.debug("episode cursor advance retries exhausted user_id=%s thread_id=%s", user_id, thread_id)
+
     async def _load_open_episode_segment(self, user_id: str, thread_id: str) -> list[dict[str, Any]]:
-        """Return the open episode segment: turns not yet folded into an episode,
-        oldest first. Independent ``episode_extracted_at`` watermark (mirror of
-        the sync helper)."""
+        """Return the open episode segment: turns created after the episodic
+        watermark (not yet folded), oldest first. Uses a per-thread
+        ``(created_at, id)`` cursor doc instead of a per-turn stamp, so episodic
+        segmentation writes nothing to the turns container (mirror of the sync
+        helper)."""
+        last_at, last_id = await self._read_episode_cursor(user_id, thread_id)
         items = await self._query_items(
             self._turns_container,
             query=(
                 "SELECT * FROM c WHERE c.user_id = @user_id "
                 "AND c.thread_id = @thread_id AND c.type = 'turn' "
-                "AND (NOT IS_DEFINED(c.episode_extracted_at) OR IS_NULL(c.episode_extracted_at))"
+                "AND (c.created_at > @last_at "
+                "OR (c.created_at = @last_at AND c.id > @last_id))"
             ),
             parameters=[
                 {"name": "@user_id", "value": user_id},
                 {"name": "@thread_id", "value": thread_id},
+                {"name": "@last_at", "value": last_at},
+                {"name": "@last_id", "value": last_id},
             ],
             partition_key=[user_id, thread_id],
         )
@@ -1248,17 +1131,20 @@ class AsyncPipelineService:
     ) -> dict[str, int]:
         """Segment the open turn stream into episodes at detected boundaries.
 
-        Mirror of the sync pipeline: the open segment is every turn without an
-        ``episode_extracted_at`` stamp; at each boundary (idle time-gap, topic
-        drift, or max-size cap) the closed segment is extracted, embedded, and
-        persisted, then its turns are stamped. ``flush=True`` drains the trailing
-        open segment. The caller never signals "session end".
+        Mirror of the sync pipeline: the open segment is every turn created after
+        the episodic watermark (see ``_read_episode_cursor``); at each boundary
+        (idle time-gap, topic drift, or max-size cap) the closed segment is
+        extracted, embedded, and persisted, then the watermark advances past those
+        turns. ``flush=True`` drains the trailing open segment. The caller never
+        signals "session end".
 
-        Idempotency is best-effort (not absolute): each episode's id is
-        deterministic in its segment key and ordinal - not the LLM summary text -
-        so re-running the same still-open segment skips the duplicate write (409)
-        while the segment's turn set is stable; a partial watermark-stamp failure
-        can still admit a duplicate, which episodic reconciliation does not fold.
+        Idempotency: each episode's id is deterministic in its segment key and
+        ordinal - not the LLM summary text - so re-running the same still-open
+        segment skips the duplicate write (409). The watermark is a single doc
+        advanced only after a segment's episodes are created, so a crash between
+        the create and the advance simply re-loads the same open segment next run
+        (same turn set -> same ids -> 409); there is no partial-stamp state that
+        could shift the boundary and admit a duplicate.
         """
         if not user_id:
             raise ValidationError("user_id is required")
@@ -1299,29 +1185,29 @@ class AsyncPipelineService:
                     )
                     break
                 # Non-retryable (e.g. content filter, context-length): quarantine the
-                # poison segment - stamp it so it never re-poisons future runs and the
-                # open segment cannot grow without bound - then advance to the next.
+                # poison segment - advance the watermark past it so it never
+                # re-poisons future runs and the open segment cannot grow without
+                # bound - then move to the next segment.
                 logger.warning(
                     "extract_episodes: quarantining %d turns after non-retryable extraction error "
-                    "(marking episode_extracted_at so they do not re-poison future runs) "
+                    "(advancing the episode watermark past them so they do not re-poison future runs) "
                     "user_id=%s thread_id=%s err=%s",
                     len(closing),
                     user_id,
                     thread_id,
                     exc,
                 )
-                await self._mark_turns_extracted(closing, field="episode_extracted_at")
+                await self._advance_episode_cursor(user_id, thread_id, closing[-1])
                 segment = segment[boundary:]
                 continue
             for doc, embedding in zip(docs, embeddings_for_docs):
                 doc["embedding"] = embedding
-                validated = self._validate_extracted_doc(doc)
                 try:
-                    await self._create_memory(validated)
+                    await self._create_memory(doc)
                     total += 1
                 except CosmosResourceExistsError:
-                    logger.info("extract_episodes idempotent skip duplicate episode id=%s", validated.get("id"))
-            await self._mark_turns_extracted(closing, field="episode_extracted_at")
+                    logger.info("extract_episodes idempotent skip duplicate episode id=%s", doc.get("id"))
+            await self._advance_episode_cursor(user_id, thread_id, closing[-1])
             segment = segment[boundary:]
         return {"episodes": total}
 
@@ -1331,40 +1217,12 @@ class AsyncPipelineService:
         *,
         force: bool = False,
     ) -> dict[str, Any]:
-        """Synthesize the active procedural prompt for a user."""
+        """Extract atomic procedural memories from behavioral facts and lessons."""
+        del force
         if not user_id:
             raise ValidationError("user_id is required")
 
-        logger.info("synthesize_procedural started user_id=%s force=%s", user_id, force)
-
-        async def _read_latest_procedural() -> Optional[dict[str, Any]]:
-            docs = await self._query_items(
-                self._memories_container,
-                query=(
-                    "SELECT * FROM c WHERE c.user_id = @uid "
-                    "AND c.thread_id = @thread_id "
-                    "AND c.type = @type "
-                    f"AND {_ACTIVE_DOC_FILTER}"
-                ),
-                parameters=[
-                    {"name": "@uid", "value": user_id},
-                    {"name": "@thread_id", "value": "__procedural__"},
-                    {"name": "@type", "value": "procedural"},
-                ],
-            )
-            docs.sort(
-                key=lambda doc: (int(doc.get("version") or 0), int(doc.get("_ts") or 0)),
-                reverse=True,
-            )
-            if len(docs) > 1:
-                logger.warning(
-                    "synthesize_procedural found multiple active docs user_id=%s count=%d",
-                    user_id,
-                    len(docs),
-                )
-            return docs[0] if docs else None
-
-        prior_doc = await _read_latest_procedural()
+        logger.info("synthesize_procedural extraction started user_id=%s", user_id)
 
         behavioral_fact_docs = await self._query_items(
             self._memories_container,
@@ -1375,7 +1233,7 @@ class AsyncPipelineService:
                 "AND ((IS_DEFINED(c.metadata.category) "
                 "AND c.metadata.category IN ('preference', 'requirement')) "
                 "OR (IS_DEFINED(c.salience) AND c.salience >= @min_salience)) "
-                "ORDER BY c.salience DESC, c.created_at ASC, c.id ASC"
+                "ORDER BY c.created_at ASC"
             ),
             parameters=[
                 {"name": "@uid", "value": user_id},
@@ -1388,7 +1246,6 @@ class AsyncPipelineService:
             for doc in behavioral_fact_docs
             if isinstance(doc.get("content"), str) and doc.get("content", "").strip()
         ]
-        behavioral_fact_ids = [doc["id"] for doc in behavioral_fact_docs]
 
         episodic_docs = await self._query_items(
             self._memories_container,
@@ -1396,150 +1253,195 @@ class AsyncPipelineService:
                 "SELECT TOP 50 * FROM c WHERE c.user_id = @uid "
                 "AND c.type = @type "
                 f"AND {_ACTIVE_DOC_FILTER} "
-                "AND IS_DEFINED(c.lessons) "
-                "AND ARRAY_LENGTH(c.lessons) > 0 "
-                "ORDER BY c.salience DESC, c.created_at ASC, c.id ASC"
+                "AND IS_DEFINED(c.lessons) AND ARRAY_LENGTH(c.lessons) > 0 "
+                "ORDER BY c.created_at ASC"
             ),
             parameters=[
                 {"name": "@uid", "value": user_id},
                 {"name": "@type", "value": "episodic"},
             ],
         )
-        episodic_with_lessons = [
-            doc
-            for doc in episodic_docs
-            if isinstance(doc.get("lessons"), list)
-            and any(isinstance(lesson, str) and lesson.strip() for lesson in doc.get("lessons", []))
-        ]
-        source_episodic_ids = [doc["id"] for doc in episodic_with_lessons]
 
-        current_source_ids = set(behavioral_fact_ids) | set(source_episodic_ids)
+        def _episodic_lessons(doc: dict[str, Any]) -> list[str]:
+            lessons = doc.get("lessons")
+            if isinstance(lessons, list):
+                return [lesson.strip() for lesson in lessons if isinstance(lesson, str) and lesson.strip()]
+            return []
 
-        def _covered_by(prior: Optional[dict[str, Any]]) -> bool:
-            if prior is None:
-                return False
-            covered = set(prior.get("source_fact_ids") or []) | set(prior.get("source_episodic_ids") or [])
-            return current_source_ids.issubset(covered)
+        fact_lines: list[str] = []
+        fact_label_to_id: dict[str, str] = {}
+        for index, doc in enumerate(behavioral_fact_docs, start=1):
+            label = f"fact-{index}"
+            category = ""
+            metadata = doc.get("metadata")
+            if isinstance(metadata, dict) and isinstance(metadata.get("category"), str):
+                category = metadata["category"].strip()
+            fact_lines.append(f"{label} [{category or 'unknown'}]: {doc['content'].strip()}")
+            if isinstance(doc.get("id"), str):
+                fact_label_to_id[label] = doc["id"]
 
-        if prior_doc and not force and _covered_by(prior_doc):
-            logger.info(
-                "synthesize_procedural unchanged user_id=%s fact_count=%d episodic_count=%d",
-                user_id,
-                len(behavioral_fact_ids),
-                len(source_episodic_ids),
-            )
-            return {"status": "unchanged", "procedural": prior_doc}
+        episodic_lines: list[str] = []
+        episodic_label_to_id: dict[str, str] = {}
+        ep_index = 0
+        for doc in episodic_docs:
+            doc_id = doc.get("id")
+            for lesson in _episodic_lessons(doc):
+                ep_index += 1
+                label = f"ep-{ep_index}"
+                episodic_lines.append(f"{label}: {lesson}")
+                if isinstance(doc_id, str):
+                    episodic_label_to_id[label] = doc_id
 
-        if not current_source_ids:
-            logger.info(
-                "synthesize_procedural skipping LLM user_id=%s - no behavioral facts or episodic lessons",
-                user_id,
-            )
-            return {"status": "unchanged", "procedural": prior_doc}
+        if not fact_lines and not episodic_lines:
+            logger.info("synthesize_procedural unchanged user_id=%s - no procedure sources", user_id)
+            return {"status": "unchanged", "procedures_created": 0}
 
-        user_name = "the user"
-
-        def _render_bullets(values: list[str]) -> str:
-            cleaned = [value.strip() for value in values if isinstance(value, str) and value.strip()]
-            if not cleaned:
-                return "(none)"
-            return "\n".join(f"- {value}" for value in cleaned)
-
-        static_prompty_inputs = {
-            "behavioral_facts": _render_bullets([doc.get("content", "") for doc in behavioral_fact_docs]),
-            "episodic_lessons": _render_bullets(
-                [
-                    lesson
-                    for doc in episodic_with_lessons
-                    for lesson in doc.get("lessons", [])
-                    if isinstance(lesson, str) and lesson.strip()
-                ]
-            ),
-            "user_name": user_name,
-        }
-
-        # Retry loop: LLM call lives inside so that on a race-induced 409
-        # we (a) check whether the winner already covers our source set and
-        # short-circuit if so, and (b) re-call the LLM with the winner as
-        # the new prior if not - keeping synthesized content monotonic in
-        # source coverage, not just version number.
-        written_doc: Optional[dict[str, Any]] = None
-        for attempt in range(1, _PROCEDURAL_MAX_CREATE_ATTEMPTS + 1):
+        try:
             response_text = await self._run_prompty(
-                "synthesize_procedural.prompty",
+                "extract_procedure.prompty",
                 inputs={
-                    "prior_prompt": (prior_doc.get("content") or "") if prior_doc else "",
-                    **static_prompty_inputs,
+                    "behavioral_facts": "\n".join(fact_lines),
+                    "episodic_lessons": "\n".join(episodic_lines),
                 },
             )
-
             parsed = self._parse_llm_json(response_text)
-            system_prompt = parsed.get("system_prompt") if isinstance(parsed, dict) else None
-            if not isinstance(system_prompt, str) or not system_prompt.strip():
-                raise LLMError("synthesize_procedural returned JSON without a non-empty 'system_prompt' string")
-            system_prompt = system_prompt.strip()
+            procedures = parsed.get("procedures", []) if isinstance(parsed, dict) else []
+            if not isinstance(procedures, list):
+                procedures = []
+        except Exception as exc:  # LLM/parsing quarantine: one bad call must not stop the pipeline.
+            if is_retryable_llm_error(exc):
+                logger.warning("synthesize_procedural deferred user_id=%s: %s", user_id, exc)
+                return {"status": "deferred", "procedures_created": 0}
+            logger.exception("synthesize_procedural skipped user_id=%s after non-retryable LLM error", user_id)
+            return {"status": "skipped", "procedures_created": 0}
 
-            new_seq = (int(prior_doc.get("version") or 0) + 1) if prior_doc else 1
-            new_doc: dict[str, Any] = {
-                "id": f"proc_{user_id}_{new_seq}",
-                "user_id": user_id,
-                "thread_id": "__procedural__",
-                "type": "procedural",
-                "version": new_seq,
-                "content": system_prompt,
-                "source_fact_ids": behavioral_fact_ids,
-                "source_episodic_ids": source_episodic_ids,
-                "supersedes_ids": [prior_doc["id"]] if prior_doc else [],
-                "created_at": datetime.now(timezone.utc).isoformat(),
-                "updated_at": datetime.now(timezone.utc).isoformat(),
-                "role": "system",
-                "tags": ["sys:procedural", "sys:synthesized"],
-                **self._prompt_lineage("synthesize_procedural.prompty"),
-                "metadata": {},
-            }
-            validated = construct_internal(ProceduralRecord, new_doc).to_doc()
+        trusted_source_kinds = {kind.value for kind in TRUSTED_PROCEDURE_SOURCE_KINDS}
+        authority_by_source = {
+            "explicit_user_instruction": "high",
+            "organization_policy": "high",
+            "observed_user_preference": "medium",
+            "episode_distillation": "medium",
+            "document_content": "low",
+            "agent_inference": "low",
+        }
+        now = datetime.now(timezone.utc).isoformat()
+        created = 0
+        skipped = 0
+
+        for proc in procedures:
             try:
-                await self._create_item(self._memories_container, body=dict(validated))
-                written_doc = validated
-                break
-            except CosmosResourceExistsError:
-                logger.info(
-                    "synthesize_procedural id collision user_id=%s seq=%d attempt=%d/%d - re-reading",
-                    user_id,
-                    new_seq,
-                    attempt,
-                    _PROCEDURAL_MAX_CREATE_ATTEMPTS,
-                )
-                latest = await _read_latest_procedural()
-                if latest is None:
+                if not isinstance(proc, dict):
+                    skipped += 1
                     continue
-                prior_doc = latest
-                if _covered_by(prior_doc):
-                    logger.info(
-                        "synthesize_procedural race resolved by coverage user_id=%s winner=%s",
-                        user_id,
-                        prior_doc["id"],
-                    )
-                    return {"status": "unchanged", "procedural": prior_doc}
-        if written_doc is None:
-            raise MemoryConflictError(
-                "synthesize_procedural failed after "
-                f"{_PROCEDURAL_MAX_CREATE_ATTEMPTS} attempts due to id collisions "
-                f"user_id={user_id!r}"
-            )
+                name = proc.get("name")
+                if not isinstance(name, str) or not name.strip():
+                    skipped += 1
+                    continue
+                name = name.strip()
 
-        new_id = written_doc["id"]
-        if prior_doc:
-            await self._mark_superseded(prior_doc, new_id, reason="update")
+                grounded_in = proc.get("grounded_in")
+                if isinstance(grounded_in, str):
+                    labels = [grounded_in]
+                elif isinstance(grounded_in, list):
+                    labels = [label for label in grounded_in if isinstance(label, str)]
+                else:
+                    labels = []
+                source_fact_ids = sorted({fact_label_to_id[label] for label in labels if label in fact_label_to_id})
+                source_episodic_ids = sorted(
+                    {episodic_label_to_id[label] for label in labels if label in episodic_label_to_id}
+                )
+
+                source_kind = proc.get("source_kind", "agent_inference")
+                if not isinstance(source_kind, str):
+                    source_kind = "agent_inference"
+                # Episode-only grounding cannot corroborate a user/org instruction:
+                # any trusted label backed solely by episodes (no behavioral fact)
+                # downgrades to episode_distillation - a candidate, never an
+                # auto-active policy.
+                if source_episodic_ids and not source_fact_ids and source_kind in trusted_source_kinds:
+                    source_kind = "episode_distillation"
+                source_authority = authority_by_source.get(source_kind, "low")
+                status = "active" if source_kind in trusted_source_kinds else "candidate"
+                # Grounding is the trust anchor: a procedure whose ``grounded_in``
+                # resolved to no persisted fact or episodic source is never
+                # auto-activated, regardless of the LLM's self-declared
+                # source_kind - this blocks an ungrounded self-labeled instruction
+                # from being compiled into the runtime system prompt.
+                if not source_fact_ids and not source_episodic_ids:
+                    status = "candidate"
+
+                summary = proc.get("summary") if isinstance(proc.get("summary"), str) else ""
+                retrieval_text = proc.get("retrieval_text") if isinstance(proc.get("retrieval_text"), str) else ""
+                scope_type = proc.get("scope_type") if isinstance(proc.get("scope_type"), str) else "user"
+                scope_value = proc.get("scope_value") if isinstance(proc.get("scope_value"), str) else None
+                proc_id = (
+                    "proc_"
+                    + hashlib.sha256(
+                        f"{user_id}|{scope_type}|{scope_value or ''}|{name.strip().lower()}".encode()
+                    ).hexdigest()[:32]
+                )
+                doc: dict[str, Any] = {
+                    "id": proc_id,
+                    "user_id": user_id,
+                    "thread_id": "__procedural__",
+                    "type": "procedural",
+                    "role": "system",
+                    "tags": ["sys:procedural", "sys:auto-extracted"],
+                    "created_at": now,
+                    "updated_at": now,
+                    "name": name,
+                    "summary": summary.strip() or name,
+                    "retrieval_text": retrieval_text.strip() or summary.strip() or name,
+                    "procedure_kind": proc.get("procedure_kind", "behavioral_policy"),
+                    "scope_type": scope_type,
+                    "scope_value": scope_value,
+                    "activation_conditions": proc.get("activation_conditions", []),
+                    "preconditions": proc.get("preconditions", []),
+                    "steps": proc.get("steps", []),
+                    "success_conditions": proc.get("success_conditions", []),
+                    "failure_conditions": proc.get("failure_conditions", []),
+                    "safety_constraints": proc.get("safety_constraints", []),
+                    "status": status,
+                    "priority": proc.get("priority", 0),
+                    # Seed utility from the LLM's extraction confidence (the
+                    # extract_procedure schema emits ``confidence``, not
+                    # ``utility_score``). Procedures are create-only today with no
+                    # promotion or outcome-scoring path, so this is the record's
+                    # final utility value.
+                    "utility_score": clamp_unit_interval(proc.get("confidence"), 0.5),
+                    "successful_uses": proc.get("successful_uses", 0),
+                    "failed_uses": proc.get("failed_uses", 0),
+                    "source_kind": source_kind,
+                    "source_authority": source_authority,
+                    "source_fact_ids": source_fact_ids,
+                    "source_episodic_ids": source_episodic_ids,
+                    "source_turn_ids": proc.get("source_turn_ids", []),
+                    "content": summary.strip() or name,
+                    "version": proc.get("version", 1),
+                    "metadata": {},
+                    **self._prompt_lineage("extract_procedure.prompty"),
+                }
+                validated = construct_internal(ProceduralRecord, doc).to_doc()
+                validated["embedding"] = await self._embed_one(validated["retrieval_text"])
+                try:
+                    await self._create_memory(validated)
+                    created += 1
+                except CosmosResourceExistsError:
+                    skipped += 1
+            except (ValidationError, PydanticValidationError, ValueError) as exc:
+                skipped += 1
+                logger.warning("synthesize_procedural dropping malformed procedure user_id=%s: %s", user_id, exc)
+            except Exception:
+                skipped += 1
+                logger.exception("synthesize_procedural failed to persist one procedure user_id=%s", user_id)
 
         logger.info(
-            "synthesize_procedural synthesized user_id=%s version=%d fact_count=%d episodic_count=%d",
+            "synthesize_procedural extracted user_id=%s procedures_created=%d procedures_skipped=%d",
             user_id,
-            written_doc["version"],
-            len(behavioral_fact_ids),
-            len(source_episodic_ids),
+            created,
+            skipped,
         )
-        return {"status": "synthesized", "procedural": written_doc}
+        return {"status": "synthesized", "procedures_created": created, "procedures_skipped": skipped}
 
     async def generate_thread_summary_durable(
         self,
@@ -1908,11 +1810,10 @@ class AsyncPipelineService:
     async def reconcile_memories(self, user_id: str, n: int = 50, *, memory_type: str = "fact") -> dict[str, int]:
         """Resolve contradictions among a user's most-recent active memories.
 
-        Async mirror of the sync contradiction-only reconcile. Near-duplicate
-        paraphrases are folded in place at write time
-        (:meth:`dedup_extracted_memories`); this pass only supersedes the loser
-        of each ``contradicted_pairs`` entry - no clustering, no merged
-        documents, no re-merge churn. Episodic and procedural types are no-ops.
+        Async mirror of the sync contradiction-only reconcile. This pass only
+        supersedes the loser of each ``contradicted_pairs`` entry - no clustering,
+        no merged documents, no re-merge churn. Episodic and procedural types are
+        no-ops.
         Returns ``{"kept", "merged", "contradicted"}`` with ``merged`` always 0.
         """
         if not user_id:
@@ -2013,29 +1914,144 @@ class AsyncPipelineService:
         )
         return result
 
-    async def build_procedural_context(self, user_id: str) -> str:
-        """Return the active synthesized procedural prompt for system injection."""
+    async def build_procedural_context(self, user_id: str, task: Optional[str] = None) -> str:
+        """Build a deterministic system prompt projection from active procedures."""
         if not user_id:
             raise ValidationError("user_id is required")
         query = (
-            "SELECT TOP 1 c.content, c.version FROM c WHERE c.user_id = @user_id "
-            "AND c.thread_id = @thread_id AND c.type = @type "
-            f"AND {_ACTIVE_DOC_FILTER} "
-            "ORDER BY c.version DESC"
+            "SELECT * FROM c WHERE c.user_id=@uid AND c.type='procedural' "
+            "AND c.status='active' "
+            "AND (NOT IS_DEFINED(c.superseded_by) OR IS_NULL(c.superseded_by))"
         )
-        items = await self._query_items(
+        procedures = await self._query_items(
             self._memories_container,
             query=query,
-            parameters=[
-                {"name": "@user_id", "value": user_id},
-                {"name": "@thread_id", "value": "__procedural__"},
-                {"name": "@type", "value": "procedural"},
-            ],
+            parameters=[{"name": "@uid", "value": user_id}],
         )
-        if not items:
+        procedures = [
+            proc
+            for proc in procedures
+            if proc.get("user_id") == user_id
+            and proc.get("type") == "procedural"
+            and proc.get("status") == "active"
+            and not proc.get("superseded_by")
+        ]
+
+        stopwords = {
+            "a",
+            "an",
+            "and",
+            "are",
+            "as",
+            "at",
+            "be",
+            "by",
+            "for",
+            "from",
+            "in",
+            "is",
+            "it",
+            "of",
+            "on",
+            "or",
+            "the",
+            "to",
+            "with",
+        }
+
+        def _tokens(value: str) -> set[str]:
+            return {token for token in re.findall(r"[a-z0-9]+", value.lower()) if token not in stopwords}
+
+        task_tokens = _tokens(task) if isinstance(task, str) and task.strip() else set()
+        policies: list[dict[str, Any]] = []
+        task_procedures: list[dict[str, Any]] = []
+        for proc in procedures:
+            kind = proc.get("procedure_kind")
+            scope_type = proc.get("scope_type")
+            if kind in {"behavioral_policy", "decision_rule"} and scope_type in {"global", "user"}:
+                policies.append(proc)
+                continue
+            if task_tokens and kind in {"workflow", "recovery_strategy", "tool_usage"}:
+                searchable = " ".join(
+                    [
+                        proc.get("retrieval_text") if isinstance(proc.get("retrieval_text"), str) else "",
+                        *[
+                            condition
+                            for condition in proc.get("activation_conditions", [])
+                            if isinstance(condition, str)
+                        ],
+                    ]
+                )
+                if task_tokens & _tokens(searchable):
+                    task_procedures.append(proc)
+
+        included = policies + task_procedures
+        if not included:
             return ""
-        content = items[0].get("content")
-        return content if isinstance(content, str) else ""
+
+        authority_rank = {"mandatory": 3, "high": 2, "medium": 1, "low": 0}
+
+        def _sort_key(proc: dict[str, Any]) -> tuple[int, int, str]:
+            try:
+                priority = int(proc.get("priority") or 0)
+            except (TypeError, ValueError):
+                priority = 0
+            authority = proc.get("source_authority")
+            rank = authority_rank.get(authority if isinstance(authority, str) else "low", 0)
+            name = proc.get("name") if isinstance(proc.get("name"), str) else ""
+            return (-priority, -rank, name.lower())
+
+        policies.sort(key=_sort_key)
+        task_procedures.sort(key=_sort_key)
+        included = policies + task_procedures
+
+        fingerprint_payload = sorted(
+            (
+                str(proc.get("id", "")),
+                str(proc.get("version", "")),
+                str(proc.get("status", "")),
+                str(proc.get("priority", "")),
+                str(proc.get("scope_type", "")),
+                str(proc.get("scope_value", "")),
+            )
+            for proc in included
+        )
+        fingerprint = hashlib.sha256(json.dumps(fingerprint_payload, separators=(",", ":")).encode()).hexdigest()
+        logger.debug(
+            "build_procedural_context fingerprint=%s included_ids=%s user_id=%s",
+            fingerprint,
+            [proc.get("id") for proc in included],
+            user_id,
+        )
+
+        lines = ["# Learned procedures"]
+        if policies:
+            lines.append("")
+            lines.append("## Behavioral policies")
+            for proc in policies:
+                name = proc.get("name") if isinstance(proc.get("name"), str) else "Unnamed procedure"
+                summary = proc.get("summary") if isinstance(proc.get("summary"), str) else proc.get("content", "")
+                lines.append(f"- {name}: {summary}")
+        if task_procedures:
+            lines.append("")
+            lines.append("## Task procedures")
+            for proc in task_procedures:
+                name = proc.get("name") if isinstance(proc.get("name"), str) else "Unnamed procedure"
+                summary = proc.get("summary") if isinstance(proc.get("summary"), str) else proc.get("content", "")
+                lines.append(f"### {name}")
+                if summary:
+                    lines.append(f"Summary: {summary}")
+                steps = proc.get("steps") if isinstance(proc.get("steps"), list) else []
+                if steps:
+                    sorted_steps = sorted(
+                        [step for step in steps if isinstance(step, dict)],
+                        key=lambda step: int(step.get("sequence") or 0),
+                    )
+                    for index, step in enumerate(sorted_steps, start=1):
+                        instruction = step.get("instruction") if isinstance(step.get("instruction"), str) else ""
+                        if instruction:
+                            lines.append(f"{index}. {instruction}")
+        return "\n".join(lines)
 
 
 __all__ = ["AsyncPipelineService"]

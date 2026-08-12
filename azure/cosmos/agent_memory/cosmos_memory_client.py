@@ -25,7 +25,7 @@ from ._utils import (
 from .auto_trigger import maybe_trigger_steps
 from .chat import ChatClient
 from .embeddings import EmbeddingsClient
-from .exceptions import CosmosOperationError, ValidationError
+from .exceptions import CosmosOperationError, MemoryNotFoundError, ValidationError
 from .processors import InProcessProcessor, MemoryProcessor
 from .services._pipeline_helpers import _normalize_cadence_thresholds, _normalize_metadata_keys
 from .services.pipeline import PipelineService
@@ -294,11 +294,9 @@ class CosmosMemoryClient(_BaseMemoryClient):
                 vector_index_type=_resolve_vector_index_type(vector_index_type),
             )
             vec_policy, idx_policy, ft_policy = _container_policies(**_policy_kwargs)
-            # Turns always carry the vector index (primed for search) but skip the
-            # salience composite index, which only procedural synthesis needs.
+            # Turns always carry the vector index (primed for search).
             turns_vec_policy, turns_idx_policy, turns_ft_policy = _container_policies(
                 **{**_policy_kwargs, "vector_index_type": "quantizedFlat"},
-                include_salience_composite=False,
             )
             self._memories_container_client = db.create_container_if_not_exists(
                 **_build_container_kwargs(
@@ -328,7 +326,6 @@ class CosmosMemoryClient(_BaseMemoryClient):
             # composite (user_id, thread_id, version) get_*_summary relies on.
             summaries_vec_policy, summaries_idx_policy, summaries_ft_policy = _container_policies(
                 **{**_policy_kwargs, "vector_index_type": "quantizedFlat"},
-                include_salience_composite=False,
             )
             summaries_idx_policy["compositeIndexes"] = [
                 [
@@ -521,7 +518,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
         """Return the Cosmos container client that owns ``memory_type``."""
         return self._containers[container_key_for_type(memory_type)]
 
-    def add_cosmos(
+    def upsert_memory(
         self,
         user_id: str,
         role: str,
@@ -569,7 +566,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
             try:
                 self._maybe_auto_trigger({(user_id, thread_id): 1})
             except Exception as exc:
-                logger.warning("Auto-trigger after add_cosmos failed: %s", exc)
+                logger.warning("Auto-trigger after upsert_memory failed: %s", exc)
         return memory_id
 
     def push_to_cosmos(self, batch_size: int = 25) -> None:
@@ -638,7 +635,7 @@ class CosmosMemoryClient(_BaseMemoryClient):
             metadata=metadata,
         )
 
-    def delete_cosmos(
+    def delete_memory(
         self,
         memory_id: str,
         *,
@@ -653,6 +650,79 @@ class CosmosMemoryClient(_BaseMemoryClient):
             thread_id=thread_id,
             memory_type=memory_type,
         )
+
+    def delete_turn(self, turn_id: str, *, user_id: str, thread_id: str) -> None:
+        """Delete a single turn document. Raises if it does not exist."""
+        return self.delete_memory(
+            turn_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            memory_type="turn",
+        )
+
+    def delete_thread_summary(self, user_id: str, thread_id: str) -> bool:
+        """Delete a thread's summary if present. Returns True when one was deleted.
+
+        The summary id is deterministic, so callers need not look it up first; a
+        missing summary is a no-op that returns False.
+        """
+        try:
+            self.delete_memory(
+                f"summary_{user_id}_{thread_id}",
+                user_id=user_id,
+                thread_id=thread_id,
+                memory_type="thread_summary",
+            )
+            return True
+        except MemoryNotFoundError:
+            return False
+
+    def delete_user_summary(self, user_id: str) -> bool:
+        """Delete a user's summary if present. Returns True when one was deleted.
+
+        A missing summary is a no-op that returns False.
+        """
+        try:
+            self.delete_memory(
+                f"user_summary_{user_id}",
+                user_id=user_id,
+                thread_id="__user_summary__",
+                memory_type="user_summary",
+            )
+            return True
+        except MemoryNotFoundError:
+            return False
+
+    def delete_thread(self, user_id: str, thread_id: str, *, include_summary: bool = True) -> int:
+        """Bulk-delete a conversation thread: all of its turns and, by default, its
+        thread summary. Returns the number of documents deleted.
+
+        This targets the conversation itself (turns + summary). Durable memories
+        distilled from the thread - facts, episodes, procedures - are user-scoped
+        knowledge and are left intact. Deletion is best-effort per document: a
+        concurrently-removed turn is skipped rather than aborting the whole sweep.
+        """
+        if not user_id:
+            raise ValidationError("user_id is required")
+        if not thread_id:
+            raise ValidationError("thread_id is required")
+
+        deleted = 0
+        turns = self.get_thread(thread_id=thread_id, user_id=user_id, include_superseded=True) or []
+        for turn in turns:
+            turn_id = turn.get("id")
+            if not turn_id:
+                continue
+            try:
+                self.delete_memory(turn_id, user_id=user_id, thread_id=thread_id, memory_type="turn")
+                deleted += 1
+            except MemoryNotFoundError:
+                continue
+
+        if include_summary and self.delete_thread_summary(user_id, thread_id):
+            deleted += 1
+
+        return deleted
 
     def search_cosmos(
         self,
@@ -692,6 +762,11 @@ class CosmosMemoryClient(_BaseMemoryClient):
         store = self._get_store()
         # Facts + episodes share one ranked query and one top_k budget: episodic
         # is added when include_episodes is True and stripped when it is False.
+        if memory_types is not None and "episodic" in memory_types and not include_episodes:
+            logger.warning(
+                "Episodic memories requested via memory_types are only returned when include_episodes=True; "
+                "proceeding without episodic memories and using facts or other requested memory types only."
+            )
         if memory_types is not None:
             base_memory_types = [t for t in memory_types if t != "episodic"]
         else:
@@ -941,8 +1016,14 @@ class CosmosMemoryClient(_BaseMemoryClient):
         return self._get_store().remove_tags(memory_id, user_id, thread_id, memory_type, tags)
 
     def get_procedural_prompt(self, user_id: str) -> Optional[str]:
-        """Return the active synthesized procedural prompt for a user."""
-        return self._get_store().get_procedural_prompt(user_id=user_id)
+        """Return the compiled procedural system prompt for a user.
+
+        The prompt is a deterministic projection of the user's active procedures
+        (compiled on demand), not a stored record. Returns None when the user has
+        no active procedures.
+        """
+        prompt = self._get_pipeline().build_procedural_context(user_id)
+        return prompt or None
 
     def get_procedural_history(self, user_id: str, limit: int = 10) -> list[dict[str, Any]]:
         """Return synthesized procedural docs for a user, newest first."""
@@ -976,9 +1057,42 @@ class CosmosMemoryClient(_BaseMemoryClient):
             include_superseded=include_superseded,
         )
 
-    def build_procedural_context(self, user_id: str) -> str:
-        """Build formatted procedural context for prompt injection."""
-        return self._get_pipeline().build_procedural_context(user_id)
+    def retrieve_procedures(
+        self,
+        user_id: str,
+        search_terms: str,
+        top_k: int = 5,
+        *,
+        scope_type: Optional[str] = None,
+        scope_value: Optional[str] = None,
+        procedure_kind: Optional[str] = None,
+        status: Optional[str] = "active",
+        include_superseded: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Context-aware semantic retrieval of a user's procedures.
+
+        Ranks active procedures by relevance to ``search_terms`` (a task or
+        situation), optionally narrowed by scope or kind. Pass ``status=None`` to
+        include non-active (e.g. candidate) procedures.
+        """
+        return self._get_store().retrieve_procedures(
+            user_id=user_id,
+            search_terms=search_terms,
+            top_k=top_k,
+            scope_type=scope_type,
+            scope_value=scope_value,
+            procedure_kind=procedure_kind,
+            status=status,
+            include_superseded=include_superseded,
+        )
+
+    def build_procedural_context(self, user_id: str, task: Optional[str] = None) -> str:
+        """Compile a procedural system-prompt projection for prompt injection.
+
+        With no ``task``, returns the user's always-on behavioral policies. With a
+        ``task`` string, also folds in relevant task procedures (skills).
+        """
+        return self._get_pipeline().build_procedural_context(user_id, task)
 
     def build_episodic_context(
         self,

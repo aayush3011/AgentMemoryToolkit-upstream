@@ -79,7 +79,7 @@ def main() -> None:
          ["workflow", "ops", "important"]),
     ]
     for mem_type, content, tags in seeds:
-        client.add_cosmos(
+        client.upsert_memory(
             user_id=user_id,
             role="system",
             content=content,

@@ -26,6 +26,11 @@ from azure.cosmos.agent_memory.models import (
     MemoryType,
     OrchestrationResult,
     ProceduralRecord,
+    ProcedureKind,
+    ProcedureScopeType,
+    ProcedureSourceKind,
+    ProcedureStatus,
+    ProcedureStep,
     SearchResult,
     ThreadSummaryRecord,
     TurnRecord,
@@ -112,8 +117,11 @@ def _procedural_kwargs(**overrides: Any) -> dict[str, Any]:
         "id": "proc_u1_1",
         "user_id": "u1",
         "content": "Be concise.",
+        "name": "Be concise",
+        "summary": "Prefer concise responses.",
+        "retrieval_text": "Respond concisely when answering the user.",
+        "procedure_kind": "behavioral_policy",
         "version": 1,
-        "source_fact_ids": ["fact_" + _HEX32],
         "prompt_id": "synthesize_procedural.prompty",
     }
     base.update(overrides)
@@ -405,22 +413,43 @@ class TestProceduralRecord:
     def test_minimal_valid(self):
         rec = ProceduralRecord(**_procedural_kwargs())
         assert rec.memory_type == "procedural"
+        assert rec.procedure_kind == "behavioral_policy"
+        assert rec.status == "candidate"
+        assert rec.utility_score == 0.5
+        assert rec.name == "Be concise"
+        assert rec.summary == "Prefer concise responses."
+        assert rec.retrieval_text == "Respond concisely when answering the user."
         assert rec.version == 1
 
-    def test_requires_non_empty_source_fact_ids(self):
-        with pytest.raises(pydantic.ValidationError, match="source"):
-            ProceduralRecord(**_procedural_kwargs(source_fact_ids=[]))
-
-    def test_accepts_episodic_only_sources(self):
-        """Procedural records driven purely off episodic lessons must be valid;
-        the validator should accept either source set being non-empty."""
-        rec = ProceduralRecord(**_procedural_kwargs(source_fact_ids=[], source_episodic_ids=["ep_abc"]))
+    def test_accepts_no_source_ids(self):
+        rec = ProceduralRecord(**_procedural_kwargs(source_fact_ids=[], source_episodic_ids=[]))
         assert rec.source_fact_ids == []
-        assert rec.source_episodic_ids == ["ep_abc"]
+        assert rec.source_episodic_ids == []
 
-    def test_rejects_when_both_source_sets_empty(self):
-        with pytest.raises(pydantic.ValidationError, match="source"):
-            ProceduralRecord(**_procedural_kwargs(source_fact_ids=[], source_episodic_ids=[]))
+    def test_workflow_without_steps_raises(self):
+        with pytest.raises(pydantic.ValidationError, match="requires at least one step"):
+            ProceduralRecord(**_procedural_kwargs(procedure_kind=ProcedureKind.workflow))
+
+    def test_workflow_with_step_is_valid(self):
+        rec = ProceduralRecord(
+            **_procedural_kwargs(
+                procedure_kind=ProcedureKind.workflow,
+                steps=[
+                    ProcedureStep(
+                        sequence=1,
+                        instruction="Check current context.",
+                        expected_result="Context is understood.",
+                    )
+                ],
+            )
+        )
+        assert rec.procedure_kind == "workflow"
+        assert rec.steps[0].instruction == "Check current context."
+
+    @pytest.mark.parametrize(("input_score", "expected"), [(5.0, 1.0), (-1, 0.0), ("not a number", 0.5)])
+    def test_utility_score_is_clamped(self, input_score, expected):
+        rec = ProceduralRecord(**_procedural_kwargs(utility_score=input_score))
+        assert rec.utility_score == expected
 
     def test_id_must_start_with_proc_prefix(self):
         with pytest.raises(pydantic.ValidationError, match="id must start with 'proc_'"):
@@ -429,6 +458,28 @@ class TestProceduralRecord:
     def test_version_must_be_positive(self):
         with pytest.raises(pydantic.ValidationError):
             ProceduralRecord(**_procedural_kwargs(version=0))
+
+    def test_round_trip_preserves_new_fields(self):
+        rec = ProceduralRecord(
+            **_procedural_kwargs(
+                procedure_kind=ProcedureKind.tool_usage,
+                scope_type=ProcedureScopeType.project,
+                scope_value="agent-memory-toolkit",
+                status=ProcedureStatus.active,
+                source_kind=ProcedureSourceKind.explicit_user_instruction,
+                source_turn_ids=["turn-1"],
+            )
+        )
+
+        restored = MemoryRecordBase.from_doc(rec.to_doc())
+
+        assert isinstance(restored, ProceduralRecord)
+        assert restored.name == "Be concise"
+        assert restored.procedure_kind == "tool_usage"
+        assert restored.scope_type == "project"
+        assert restored.status == "active"
+        assert restored.source_kind == "explicit_user_instruction"
+        assert restored.source_turn_ids == ["turn-1"]
 
 
 # ---------------------------------------------------------------------------

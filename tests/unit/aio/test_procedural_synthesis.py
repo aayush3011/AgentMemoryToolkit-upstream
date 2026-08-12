@@ -1,178 +1,206 @@
-"""Async tests for procedural synthesis and procedural prompt retrieval.
-
-The procedural-synthesis business logic is covered exhaustively by sync
-tests in ``tests/unit/test_procedural_synthesis.py`` against
-``PipelineService``; ``AsyncPipelineService`` is a 1:1 async mirror.
-These tests verify async wiring - that the client awaits the pipeline
-correctly, that the durable-processor branch short-circuits, and that
-the store-backed procedural reads work over async iterators.
-"""
+"""Async tests for atomic procedural synthesis and compiled procedural context."""
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from typing import Any
 
 import pytest
+from azure.cosmos.exceptions import CosmosResourceExistsError
 
-from azure.cosmos.agent_memory.aio.cosmos_memory_client import AsyncCosmosMemoryClient
-from azure.cosmos.agent_memory.aio.processors import AsyncDurableFunctionProcessor
-
-
-class AsyncIterator:
-    def __init__(self, items):
-        self._items = iter(items)
-
-    def __aiter__(self):
-        return self
-
-    async def __anext__(self):
-        try:
-            return next(self._items)
-        except StopIteration:
-            raise StopAsyncIteration
+from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
+from tests.unit.services.test_extract_dry import (
+    _async_containers_for_store,
+    _AsyncChat,
+    _AsyncEmbeddings,
+    _AsyncStore,
+)
 
 
-def _procedural_doc(
-    doc_id: str,
-    *,
-    version: int,
-    content: str,
-    source_fact_ids: list[str],
-    source_episodic_ids: list[str],
-    superseded_by: str | None = None,
-    ts: int = 0,
-    etag: str = "etag-1",
-) -> dict:
-    doc = {
-        "id": doc_id,
+class _AsyncProceduralStore(_AsyncStore):
+    async def query(self, sql: str, parameters=None, partition_key=None, cross_partition: bool = False):
+        del partition_key, cross_partition
+        params = {p["name"]: p["value"] for p in (parameters or [])}
+        user_id = params.get("@uid", params.get("@user_id"))
+        memory_type = params.get("@type", params.get("@memory_type"))
+        docs = [dict(doc) for doc in self.docs]
+        if user_id is not None:
+            docs = [doc for doc in docs if doc.get("user_id") == user_id]
+        if memory_type is not None:
+            docs = [doc for doc in docs if doc.get("type") == memory_type]
+        if "c.status='active'" in sql:
+            docs = [doc for doc in docs if doc.get("status") == "active"]
+        if "superseded_by" in sql:
+            docs = [doc for doc in docs if not doc.get("superseded_by")]
+        return docs
+
+    async def create_item(self, *, body: dict[str, Any]) -> dict[str, Any]:
+        if any(doc.get("id") == body.get("id") for doc in self.docs):
+            raise CosmosResourceExistsError(message="conflict")
+        self.docs.append(dict(body))
+        return dict(body)
+
+
+def _service(
+    store: _AsyncProceduralStore,
+    responses: list[dict[str, Any]] | None = None,
+) -> AsyncPipelineService:
+    return AsyncPipelineService(
+        store,
+        _AsyncChat(responses or []),
+        _AsyncEmbeddings(),
+        containers=_async_containers_for_store(store),
+    )
+
+
+def _fact() -> dict[str, Any]:
+    return {
+        "id": "fact-raw-1",
         "user_id": "u1",
-        "thread_id": "__procedural__",
-        "type": "procedural",
-        "version": version,
-        "content": content,
-        "source_fact_ids": list(source_fact_ids),
-        "source_episodic_ids": list(source_episodic_ids),
-        "supersedes_ids": [],
-        "created_at": f"2025-01-0{version}T00:00:00+00:00",
-        "role": "system",
-        "tags": ["sys:procedural", "sys:synthesized"],
-        "_etag": etag,
-        "_ts": ts,
+        "type": "fact",
+        "content": "The user explicitly said to run targeted tests before reporting success.",
+        "metadata": {"category": "preference"},
+        "salience": 0.9,
+        "created_at": "2025-01-01T00:00:00+00:00",
     }
-    if superseded_by is not None:
-        doc["superseded_by"] = superseded_by
-    return doc
 
 
-def _make_client(*, processor=None) -> AsyncCosmosMemoryClient:
-    client = AsyncCosmosMemoryClient(use_default_credential=False, processor=processor)
-    client._memories_container_client = MagicMock()
-    client._turns_container_client = client._memories_container_client
-    client._summaries_container_client = client._memories_container_client
-    return client
+def _episode() -> dict[str, Any]:
+    return {
+        "id": "episode-raw-1",
+        "user_id": "u1",
+        "type": "episodic",
+        "content": "A retry investigation succeeded.",
+        "lessons": ["Retry transient CI failures once before escalating."],
+        "salience": 0.8,
+        "created_at": "2025-01-01T00:01:00+00:00",
+    }
 
 
-@pytest.mark.asyncio
-async def test_async_synthesize_procedural_awaits_async_pipeline():
-    """The client must ``await`` ``AsyncPipelineService.synthesize_procedural``
-    directly (no ``asyncio.to_thread`` indirection) and forward force=True."""
-    client = _make_client()
-    pipeline = AsyncMock()
-    expected = {"status": "synthesized", "procedural": {"id": "proc_u1_1", "version": 1}}
-    pipeline.synthesize_procedural.return_value = expected
-    pipeline._store = client._get_store()
-    pipeline._containers = dict(client._containers)
-    client._pipeline = pipeline
-
-    result = await client.synthesize_procedural("u1", force=True)
-
-    assert result == expected
-    pipeline.synthesize_procedural.assert_awaited_once_with("u1", force=True)
-
-
-@pytest.mark.asyncio
-async def test_async_get_procedural_prompt_returns_none_when_missing():
-    client = _make_client()
-    client._memories_container_client.query_items = MagicMock(return_value=AsyncIterator([]))
-
-    assert await client.get_procedural_prompt("u1") is None
-
-
-@pytest.mark.asyncio
-async def test_async_get_procedural_prompt_returns_active_content():
-    active_doc = _procedural_doc(
-        "proc_u1_2",
-        version=2,
-        content="Active prompt",
-        source_fact_ids=["f1"],
-        source_episodic_ids=["e1"],
-        ts=2,
-    )
-    superseded_doc = _procedural_doc(
-        "proc_u1_1",
-        version=1,
-        content="Old prompt",
-        source_fact_ids=["f1"],
-        source_episodic_ids=["e1"],
-        superseded_by="proc_u1_2",
-        ts=1,
-    )
-    docs = [superseded_doc, active_doc]
-    client = _make_client()
-
-    def _query_items(**kwargs):
-        query = kwargs["query"]
-        if "superseded_by" in query:
-            return AsyncIterator([doc for doc in docs if not doc.get("superseded_by")])
-        return AsyncIterator(docs)
-
-    client._memories_container_client.query_items = MagicMock(side_effect=_query_items)
-
-    assert await client.get_procedural_prompt("u1") == "Active prompt"
+def _procedure(
+    name: str,
+    *,
+    grounded_in: list[str],
+    source_kind: str,
+    summary: str = "Run targeted tests before reporting success.",
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "summary": summary,
+        "retrieval_text": summary,
+        "procedure_kind": "behavioral_policy",
+        "scope_type": "user",
+        "scope_value": None,
+        "activation_conditions": [],
+        "preconditions": [],
+        "steps": [],
+        "success_conditions": [],
+        "failure_conditions": [],
+        "safety_constraints": [],
+        "source_kind": source_kind,
+        "grounded_in": grounded_in,
+        "confidence": 0.8,
+    }
 
 
 @pytest.mark.asyncio
-async def test_async_get_procedural_history_orders_active_first_then_newest_versions():
-    v1 = _procedural_doc(
-        "proc_u1_1",
-        version=1,
-        content="v1",
-        source_fact_ids=["f1"],
-        source_episodic_ids=["e1"],
-        superseded_by="proc_u1_2",
-        ts=1,
+async def test_synthesize_procedural_extracts_atomic_procedures_and_gates_provenance() -> None:
+    store = _AsyncProceduralStore([_fact(), _episode()])
+    service = _service(
+        store,
+        [
+            {
+                "procedures": [
+                    _procedure(
+                        "Targeted testing",
+                        grounded_in=["fact-1"],
+                        source_kind="explicit_user_instruction",
+                    ),
+                    _procedure(
+                        "Retry CI failures",
+                        grounded_in=["ep-1"],
+                        source_kind="episode_distillation",
+                        summary="Retry transient CI failures once before escalating.",
+                    ),
+                ]
+            }
+        ],
     )
-    v2 = _procedural_doc(
-        "proc_u1_2",
-        version=2,
-        content="v2",
-        source_fact_ids=["f1", "f2"],
-        source_episodic_ids=["e1"],
-        superseded_by="proc_u1_3",
-        ts=2,
-    )
-    v3 = _procedural_doc(
-        "proc_u1_3",
-        version=3,
-        content="v3",
-        source_fact_ids=["f1", "f2", "f3"],
-        source_episodic_ids=["e1"],
-        ts=3,
-    )
-    client = _make_client()
-    client._memories_container_client.query_items = MagicMock(return_value=AsyncIterator([v1, v3, v2]))
 
-    history = await client.get_procedural_history("u1", limit=10)
+    result = await service.synthesize_procedural("u1")
 
-    assert [doc["id"] for doc in history] == ["proc_u1_3", "proc_u1_2", "proc_u1_1"]
+    assert result == {"status": "synthesized", "procedures_created": 2, "procedures_skipped": 0}
+    procedures = [doc for doc in store.docs if doc.get("type") == "procedural"]
+    assert len(procedures) == 2
+    assert {doc["name"]: doc["status"] for doc in procedures} == {
+        "Targeted testing": "active",
+        "Retry CI failures": "candidate",
+    }
+    assert {doc["name"]: doc["source_kind"] for doc in procedures} == {
+        "Targeted testing": "explicit_user_instruction",
+        "Retry CI failures": "episode_distillation",
+    }
+    for doc in procedures:
+        assert doc["id"].startswith("proc_")
+        assert doc["type"] == "procedural"
+        assert doc["name"]
+        assert doc["retrieval_text"]
+        assert doc["thread_id"] == "__procedural__"
+        assert doc["embedding"] == [1.0]
+        # utility_score is seeded from the LLM confidence (0.8), not hard-wired to 0.5.
+        assert doc["utility_score"] == 0.8
 
 
 @pytest.mark.asyncio
-async def test_async_client_synthesize_procedural_raises_for_remote_processors():
-    client = _make_client(processor=AsyncDurableFunctionProcessor())
-    client._pipeline = AsyncMock()
+async def test_synthesize_procedural_is_idempotent_by_scope_and_name() -> None:
+    store = _AsyncProceduralStore([_fact()])
+    response = {
+        "procedures": [
+            _procedure(
+                "Targeted testing",
+                grounded_in=["fact-1"],
+                source_kind="explicit_user_instruction",
+            )
+        ]
+    }
+    service = _service(store, [response, response])
 
-    with pytest.raises(NotImplementedError, match="durable mode"):
-        await client.synthesize_procedural("u1")
+    first = await service.synthesize_procedural("u1")
+    second = await service.synthesize_procedural("u1")
 
-    client._pipeline.synthesize_procedural.assert_not_called()
+    assert first == {"status": "synthesized", "procedures_created": 1, "procedures_skipped": 0}
+    assert second == {"status": "synthesized", "procedures_created": 0, "procedures_skipped": 1}
+    procedures = [doc for doc in store.docs if doc.get("type") == "procedural"]
+    assert len(procedures) == 1
+
+
+@pytest.mark.asyncio
+async def test_build_procedural_context_uses_active_procedures_only() -> None:
+    active = {
+        "id": "proc-active",
+        "user_id": "u1",
+        "type": "procedural",
+        "status": "active",
+        "name": "Targeted testing",
+        "summary": "Run targeted tests before reporting success.",
+        "retrieval_text": "tests success",
+        "procedure_kind": "behavioral_policy",
+        "scope_type": "user",
+        "scope_value": None,
+        "priority": 10,
+        "source_authority": "high",
+        "version": 1,
+    }
+    candidate = {
+        **active,
+        "id": "proc-candidate",
+        "status": "candidate",
+        "name": "Candidate policy",
+        "summary": "Do not include this candidate procedure.",
+    }
+    service = _service(_AsyncProceduralStore([active, candidate]))
+
+    context = await service.build_procedural_context("u1")
+
+    assert "Run targeted tests before reporting success." in context
+    assert "Do not include this candidate procedure." not in context
+    assert await service.build_procedural_context("missing-user") == ""

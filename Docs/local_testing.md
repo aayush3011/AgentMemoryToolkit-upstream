@@ -182,7 +182,7 @@ memory.add_local(user_id="user-001", role="user", thread_id=thread_id, content="
 memory.push_to_cosmos()
 
 # Or add directly to Cosmos
-memory.add_cosmos(user_id="user-001", role="agent", thread_id=thread_id, content="Direct Cosmos write")
+memory.upsert_memory(user_id="user-001", role="agent", thread_id=thread_id, content="Direct Cosmos write")
 
 # Query with filters including thread_id
 results = memory.get_memories(user_id="user-001", thread_id=thread_id)
@@ -225,7 +225,7 @@ await memory.connect_cosmos(
 await memory.create_memory_store()
 
 thread_id = str(uuid.uuid4())
-await memory.add_cosmos(user_id="user-001", role="user", thread_id=thread_id, content="Async Cosmos write")
+await memory.upsert_memory(user_id="user-001", role="user", thread_id=thread_id, content="Async Cosmos write")
 results = await memory.get_memories(user_id="user-001", thread_id=thread_id)
 for r in results:
     print(f"  [{r['thread_id'][:8]}...] [{r['id'][:8]}...] role={r['role']:<6} {r['content'][:60]}")
@@ -365,7 +365,7 @@ import uuid
 
 thread_id = str(uuid.uuid4())
 for i in range(3):
-    memory.add_cosmos(
+    memory.upsert_memory(
         user_id="user-001",
         thread_id=thread_id,
         role="user",

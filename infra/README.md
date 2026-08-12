@@ -113,7 +113,7 @@ The Function app uses a counter document per `(user_id, thread_id)` to decide wh
 | `azd env` variable | Bicep param | Default | Effect |
 |---|---|---|---|
 | `THREAD_SUMMARY_EVERY_N` | `threadSummaryEveryN` | `10` | Run thread-summary orchestration every N turns within a `(user_id, thread_id)`. `0` disables it. |
-| `FACT_EXTRACTION_EVERY_N` | `factExtractionEveryN` | `1` | Run fact / episodic / procedural extraction every N turns within a `(user_id, thread_id)`. `0` disables it. |
+| `FACT_EXTRACTION_EVERY_N` | `factExtractionEveryN` | `2` | Run fact / episodic / procedural extraction every N turns within a `(user_id, thread_id)`. `0` disables it. |
 | `DEDUP_EVERY_N` | `dedupEveryN` | `5` | Run fact dedup every Nth fact-extraction (so dedup actually fires every `FACT_EXTRACTION_EVERY_N × DEDUP_EVERY_N` turns). |
 | `USER_SUMMARY_EVERY_N` | `userSummaryEveryN` | `20` | Run user-summary orchestration every N turns from a given `user_id` across all threads. `0` disables it. |
 | `MAX_BATCH_SIZE` | `maxBatchSize` | `20` | Maximum number of change-feed items processed per orchestration batch. |

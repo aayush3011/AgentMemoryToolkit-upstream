@@ -100,7 +100,7 @@ def main() -> None:
     try:
         banner("1. Seeding paraphrased facts (duplicates)")
         for content in PARAPHRASED_FACTS:
-            mem.add_cosmos(
+            mem.upsert_memory(
                 user_id=unique_user_id,
                 role="user",
                 content=content,
@@ -112,7 +112,7 @@ def main() -> None:
 
         banner("2. Seeding contradicting facts")
         for content in CONTRADICTING_FACTS:
-            mem.add_cosmos(
+            mem.upsert_memory(
                 user_id=unique_user_id,
                 role="user",
                 content=content,
@@ -161,7 +161,7 @@ def main() -> None:
             deleted = 0
             for rec in all_records:
                 try:
-                    mem.delete_cosmos(
+                    mem.delete_memory(
                         memory_id=rec["id"],
                         user_id=unique_user_id,
                         thread_id=rec.get("thread_id", unique_thread_id),

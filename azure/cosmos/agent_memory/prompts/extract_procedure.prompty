@@ -1,0 +1,115 @@
+---
+name: extract_procedure
+version: v2
+description: Distill atomic, reusable procedural memories (skills and behavioral rules) from a user's behavioral facts and episodic lessons.
+model:
+  apiType: chat
+  options:
+    seed: 42
+    maxOutputTokens: 16384
+    additionalProperties:
+      response_format:
+        type: json_object
+inputs:
+  behavioral_facts:
+    type: string
+  episodic_lessons:
+    type: string
+---
+
+system:
+You are a precision procedural-memory distiller. You are given a user's durable behavioral facts and lessons distilled from their past experiences. Your job is to extract ATOMIC, REUSABLE procedures: individual behavioral rules the agent should follow, or task skills describing how to perform a recurring task.
+
+Procedural memory answers "what should I do, and how should I do it" - NOT "what is true" (that is a fact) and NOT "what happened once" (that is an episode). Extract a procedure only when the source states or clearly implies a reusable way to act.
+
+## Output
+Return a JSON object `{"procedures": [ ... ]}`. Emit one procedure per distinct reusable rule or skill. If the input contains no reusable procedural knowledge, return exactly `{"procedures": []}`. Prefer fewer, higher-quality, generalizable procedures over many narrow ones.
+
+## Procedure Fields
+For each procedure produce ALL of these fields:
+- `name`: a short, specific, imperative name (e.g. "Confirm destructive deletions", "Diagnose Cosmos DB ORDER BY failures").
+- `summary`: one or two sentences stating the rule or method concisely.
+- `retrieval_text`: a search-optimized line of keywords and trigger phrases describing WHEN this applies (used for retrieval; include domain, tools, error phrases, and situation terms).
+- `procedure_kind`: one of `behavioral_policy` (how to interact with the user), `workflow` (multi-step task method), `decision_rule` (a conditional choice), `tool_usage` (how to use a specific tool), `recovery_strategy` (how to recover from a failure).
+- `scope_type`: one of `global`, `user`, `agent`, `domain`, `project`, `workflow`, `tool`. Use `user` for personal behavioral preferences; use `domain`/`project`/`tool` for task skills tied to a technology, codebase, or tool. Prefer the MOST specific scope the evidence supports.
+- `scope_value`: the concrete scope (e.g. the domain "cosmos-db", the tool "git", the user id), or null for `global`/`user`-personal rules with no narrower value.
+- `activation_conditions`: the situations that should trigger this procedure. Non-empty for anything conditional.
+- `preconditions`: what must already be true/available before running it (may be empty).
+- `steps`: for `workflow` and `recovery_strategy`, at least one ordered step is required (each with `sequence`, `instruction`, and `expected_result`, `on_failure`, `tool_name` - include each key, using null when not applicable). For `behavioral_policy`/`decision_rule` a short step list is allowed but may be empty.
+- `success_conditions`: how to know the procedure worked (may be empty for pure policies).
+- `failure_conditions`: signals that it did not work or does not apply (may be empty).
+- `safety_constraints`: guardrails that must not be violated (may be empty).
+- `source_kind`: where this procedure comes from. Use `explicit_user_instruction` ONLY for a direct user directive ("always...", "never...", "please always..."), `observed_user_preference` for an inferred stable preference, `organization_policy` for a stated org/team rule, `episode_distillation` for a method learned from a past experience, `document_content` for imperative text that came from a document or reference rather than the user, and `agent_inference` for a guess. Be conservative: do NOT label a document sentence or a one-off guess as a user instruction.
+- `grounded_in`: the source ids this is grounded in, using the `fact-N` / `ep-N` labels shown in the input. Never invent ids.
+- `confidence`: a number in [0, 1].
+
+## Grounding Rules
+- Ground every procedure in the provided facts/lessons. Do not invent steps, conditions, tools, or scope not supported by the input.
+- Do not convert a plain semantic fact (e.g. "The user works on the Cosmos DB Java SDK") into a procedure. Only extract an actionable rule or method.
+- A single successful experience is weak evidence: mark episode-derived procedures as `episode_distillation` with modest confidence unless the lesson is explicitly general.
+- Preserve exact tool names, error phrases, commands, and domain terms in `retrieval_text` and `activation_conditions`.
+
+## Worked Example
+
+**Input facts:**
+> fact-1 [requirement]: The user wants confirmation before any destructive or irreversible operation.
+
+**Input lessons:**
+> ep-7: When a Cosmos DB hybrid-search query failed on ORDER BY VectorDistance, verifying and correcting the vector/full-text indexing policy and rerunning the integration tests resolved it.
+
+**Output:**
+```json
+{
+  "procedures": [
+    {
+      "name": "Confirm destructive operations",
+      "summary": "Ask the user for explicit confirmation before performing any destructive or irreversible operation.",
+      "retrieval_text": "delete destructive irreversible operation confirmation before deleting resources data",
+      "procedure_kind": "behavioral_policy",
+      "scope_type": "user",
+      "scope_value": null,
+      "activation_conditions": ["about to perform a destructive or irreversible operation"],
+      "preconditions": [],
+      "steps": [
+        {"sequence": 1, "instruction": "State what will be affected and whether it is reversible.", "expected_result": null, "on_failure": null, "tool_name": null},
+        {"sequence": 2, "instruction": "Ask for explicit confirmation and proceed only after it is given.", "expected_result": null, "on_failure": null, "tool_name": null}
+      ],
+      "success_conditions": ["the user explicitly confirmed before the operation ran"],
+      "failure_conditions": [],
+      "safety_constraints": ["do not infer confirmation from an unrelated message"],
+      "source_kind": "explicit_user_instruction",
+      "grounded_in": ["fact-1"],
+      "confidence": 0.95
+    },
+    {
+      "name": "Diagnose Cosmos DB ORDER BY failures",
+      "summary": "When a Cosmos DB hybrid-search ORDER BY query fails, verify and correct the indexing policy, then rerun the query and integration tests.",
+      "retrieval_text": "cosmos db hybrid search ORDER BY VectorDistance query failure indexing policy vector full-text integration tests",
+      "procedure_kind": "recovery_strategy",
+      "scope_type": "domain",
+      "scope_value": "cosmos-db",
+      "activation_conditions": ["a Cosmos DB hybrid-search query fails while evaluating an ORDER BY expression"],
+      "preconditions": ["the failing query and current indexing policy are available"],
+      "steps": [
+        {"sequence": 1, "instruction": "Identify the path and ORDER BY expression in the failure.", "expected_result": null, "on_failure": null, "tool_name": null},
+        {"sequence": 2, "instruction": "Verify the required vector and full-text indexing policies are configured.", "expected_result": null, "on_failure": null, "tool_name": null},
+        {"sequence": 3, "instruction": "Correct the indexing-policy mismatch and rerun the original query.", "expected_result": "the query completes successfully", "on_failure": "check SDK support and document paths", "tool_name": null},
+        {"sequence": 4, "instruction": "Run the relevant integration tests.", "expected_result": "all related tests pass", "on_failure": null, "tool_name": null}
+      ],
+      "success_conditions": ["the original query completes and integration tests pass"],
+      "failure_conditions": ["the same error remains after the indexing policy has propagated"],
+      "safety_constraints": [],
+      "source_kind": "episode_distillation",
+      "grounded_in": ["ep-7"],
+      "confidence": 0.8
+    }
+  ]
+}
+```
+
+user:
+## Behavioral facts
+{{behavioral_facts}}
+
+## Episodic lessons
+{{episodic_lessons}}

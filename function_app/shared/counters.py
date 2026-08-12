@@ -292,9 +292,27 @@ async def advance_extract_watermark(
     thread_id: str,
     count: int,
 ) -> None:
-    """Stamp ``last_extract_count=count`` after a successful extract."""
-    patch_ops = [{"op": "add", "path": "/last_extract_count", "value": int(count)}]
+    """Advance ``last_extract_count`` to ``count`` after a successful extract.
+
+    Monotonic: a conditional patch (``filter_predicate``) applies the new value
+    only when it is strictly greater than the stored one, so an out-of-order
+    completion from a concurrent run can never regress the watermark below a
+    higher value another run already wrote (a regression would re-extract
+    already-covered turns - RU waste, though the deterministic-id create dedups
+    the facts). A 412 means a higher watermark already won; keep it.
+    """
+    count = int(count)
+    patch_ops = [{"op": "add", "path": "/last_extract_count", "value": count}]
     try:
-        await container.patch_item(item=counter_id, partition_key=[user_id, thread_id], patch_operations=patch_ops)
+        await container.patch_item(
+            item=counter_id,
+            partition_key=[user_id, thread_id],
+            patch_operations=patch_ops,
+            filter_predicate=(f"FROM c WHERE NOT IS_DEFINED(c.last_extract_count) OR c.last_extract_count < {count}"),
+        )
+    except CosmosHttpResponseError as exc:
+        if exc.status_code == 412:
+            return  # another run already advanced past this count
+        logger.debug("advance_extract_watermark failed counter_id=%s: %s", counter_id, exc)
     except Exception as exc:  # pragma: no cover - best-effort
         logger.debug("advance_extract_watermark failed counter_id=%s: %s", counter_id, exc)

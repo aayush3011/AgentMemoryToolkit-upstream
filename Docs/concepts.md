@@ -28,7 +28,7 @@ Every memory uses the same base shape:
 
 **Type:** `turn`
 
-Turn memories are raw conversation records. They are created by `add_local()`, `add_cosmos()`, and `push_to_cosmos()` (which bulk-uploads local memories to Cosmos DB). They act as the source material for summaries and facts.
+Turn memories are raw conversation records. They are created by `add_local()`, `upsert_memory()`, and `push_to_cosmos()` (which bulk-uploads local memories to Cosmos DB). They act as the source material for summaries and facts.
 
 **Use for:** full conversation history and short-term context.
 
@@ -68,7 +68,7 @@ Like thread summaries, user summaries update incrementally by merging the existi
 |-----------------|-----------------------------------------------------|-----------------------------------------------------------------------------|
 | **What**        | Turn messages                                       | Summaries, facts, user summaries                                            |
 | **Granularity** | Per message                                         | Per thread, per fact, or per user                                           |
-| **Created by**  | `add_local()` / `add_cosmos()` / `push_to_cosmos()` | `generate_thread_summary()` / `extract_facts()` / `generate_user_summary()` |
+| **Created by**  | `add_local()` / `upsert_memory()` / `push_to_cosmos()` | `generate_thread_summary()` / `extract_facts()` / `generate_user_summary()` |
 | **Purpose**     | Replay recent context                               | Compact recall and semantic retrieval                                       |
 
 Common pattern: keep turns during an active conversation, then generate summaries or facts when the thread gets long or is complete.
@@ -203,11 +203,11 @@ on_memory_change trigger
 
 | Setting                   | Scope                              | Default        |
 |---------------------------|------------------------------------|----------------|
-| `THREAD_SUMMARY_EVERY_N`  | Per `(user_id, thread_id)`         | `0` (disabled) |
-| `FACT_EXTRACTION_EVERY_N` | Per `(user_id, thread_id)`         | `0` (disabled) |
-| `USER_SUMMARY_EVERY_N`    | Per `user_id` (across all threads) | `0` (disabled) |
+| `THREAD_SUMMARY_EVERY_N`  | Per `(user_id, thread_id)`         | `10`           |
+| `FACT_EXTRACTION_EVERY_N` | Per `(user_id, thread_id)`         | `2`            |
+| `USER_SUMMARY_EVERY_N`    | Per `user_id` (across all threads) | `20`           |
 
-Set any value to `0` to disable that processing type. For example, setting `THREAD_SUMMARY_EVERY_N=5` generates a thread summary every 5 new turns in each thread.
+These defaults are shared by both backends (`function_app/shared/config.py` imports the same constants from `azure.cosmos.agent_memory.thresholds`), so the InProcess and Durable processors fire on the same turn boundaries unless overridden. Set any value to `0` to disable that processing type. For example, setting `THREAD_SUMMARY_EVERY_N=5` generates a thread summary every 5 new turns in each thread.
 
 ### Required containers
 

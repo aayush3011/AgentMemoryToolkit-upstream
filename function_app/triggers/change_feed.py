@@ -123,6 +123,7 @@ async def process_changefeed_batch(
 
     n_thread = config.get_thread_summary_every_n()
     n_facts = config.get_fact_extraction_every_n()
+    n_episode = config.get_episode_eval_every_n()
     n_user = config.get_user_summary_every_n()
     n_dedup = config.get_dedup_every_n()
 
@@ -130,7 +131,7 @@ async def process_changefeed_batch(
     # auto-trigger contract. Disabled when either knob is 0.
     n_dedup_turns = n_facts * n_dedup if (n_facts > 0 and n_dedup > 0) else 0
 
-    if n_thread == 0 and n_facts == 0 and n_user == 0:
+    if n_thread == 0 and n_facts == 0 and n_episode == 0 and n_user == 0:
         return  # all orchestrators disabled
 
     # ---- Step 1: Filter to turns + group by scope ----
@@ -147,6 +148,10 @@ async def process_changefeed_batch(
     for doc in documents:
         if doc.get("type") != "turn":
             continue
+        # Turns are append-only from this trigger's perspective: the Durable
+        # backend never mutates a turn doc (episodic segmentation advances a
+        # separate cursor doc; fact extraction is count-based), so each turn is
+        # delivered - and counted - exactly once, at creation.
         user_id = doc.get("user_id")
         thread_id = doc.get("thread_id")
         if not user_id or not thread_id:
@@ -167,7 +172,7 @@ async def process_changefeed_batch(
             thread_max_lsn[tkey] = max(thread_max_lsn.get(tkey, 0), lsn_int)
             user_max_lsn[user_id] = max(user_max_lsn.get(user_id, 0), lsn_int)
 
-    thread_enabled = n_thread > 0 or n_facts > 0
+    thread_enabled = n_thread > 0 or n_facts > 0 or n_episode > 0
     user_enabled = n_user > 0
 
     if not thread_counts and not user_counts:
@@ -228,6 +233,16 @@ async def process_changefeed_batch(
                         "reconcile": should_reconcile,
                         "recent_k": recent_k,
                     },
+                    orchestration_errors,
+                )
+
+            if n_episode > 0 and crosses_threshold(old_count, new_count, n_episode):
+                instance_id = f"episode:{user_id}:{thread_id}:{new_count}"
+                await _safe_start(
+                    starter,
+                    "ExtractEpisodesOrchestrator",
+                    instance_id,
+                    {"user_id": user_id, "thread_id": thread_id, "count": new_count},
                     orchestration_errors,
                 )
 

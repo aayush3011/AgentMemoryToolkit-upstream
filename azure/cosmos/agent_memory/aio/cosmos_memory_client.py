@@ -27,7 +27,12 @@ from azure.cosmos.agent_memory.aio.embeddings import AsyncEmbeddingsClient
 from azure.cosmos.agent_memory.aio.processors import AsyncInProcessProcessor, AsyncMemoryProcessor
 from azure.cosmos.agent_memory.aio.services.pipeline import AsyncPipelineService
 from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
-from azure.cosmos.agent_memory.exceptions import CosmosNotConnectedError, CosmosOperationError, ValidationError
+from azure.cosmos.agent_memory.exceptions import (
+    CosmosNotConnectedError,
+    CosmosOperationError,
+    MemoryNotFoundError,
+    ValidationError,
+)
 from azure.cosmos.agent_memory.logging import get_logger
 from azure.cosmos.agent_memory.services._pipeline_helpers import (
     _normalize_cadence_thresholds,
@@ -340,7 +345,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
 
             turns_vec_policy, turns_idx_policy, turns_ft_policy = _container_policies(
                 **{**_policy_kwargs, "vector_index_type": "quantizedFlat"},
-                include_salience_composite=False,
             )
             self._turns_container_client = await db.create_container_if_not_exists(
                 **_build_container_kwargs(
@@ -356,7 +360,6 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             logger.info("Created turns container: %s/%s", self._cosmos_database, self._cosmos_turns_container)
             summaries_vec_policy, summaries_idx_policy, summaries_ft_policy = _container_policies(
                 **{**_policy_kwargs, "vector_index_type": "quantizedFlat"},
-                include_salience_composite=False,
             )
             summaries_idx_policy["compositeIndexes"] = [
                 [
@@ -562,7 +565,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         """Return the Cosmos container client that owns ``memory_type``."""
         return self._containers[container_key_for_type(memory_type)]
 
-    async def add_cosmos(
+    async def upsert_memory(
         self,
         user_id: str,
         role: str,
@@ -677,7 +680,7 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             metadata=metadata,
         )
 
-    async def delete_cosmos(
+    async def delete_memory(
         self,
         memory_id: str,
         *,
@@ -691,6 +694,79 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             thread_id=thread_id,
             memory_type=memory_type,
         )
+
+    async def delete_turn(self, turn_id: str, *, user_id: str, thread_id: str) -> None:
+        """Delete a single turn document. Raises if it does not exist."""
+        return await self.delete_memory(
+            turn_id,
+            user_id=user_id,
+            thread_id=thread_id,
+            memory_type="turn",
+        )
+
+    async def delete_thread_summary(self, user_id: str, thread_id: str) -> bool:
+        """Delete a thread's summary if present. Returns True when one was deleted.
+
+        The summary id is deterministic, so callers need not look it up first; a
+        missing summary is a no-op that returns False.
+        """
+        try:
+            await self.delete_memory(
+                f"summary_{user_id}_{thread_id}",
+                user_id=user_id,
+                thread_id=thread_id,
+                memory_type="thread_summary",
+            )
+            return True
+        except MemoryNotFoundError:
+            return False
+
+    async def delete_user_summary(self, user_id: str) -> bool:
+        """Delete a user's summary if present. Returns True when one was deleted.
+
+        A missing summary is a no-op that returns False.
+        """
+        try:
+            await self.delete_memory(
+                f"user_summary_{user_id}",
+                user_id=user_id,
+                thread_id="__user_summary__",
+                memory_type="user_summary",
+            )
+            return True
+        except MemoryNotFoundError:
+            return False
+
+    async def delete_thread(self, user_id: str, thread_id: str, *, include_summary: bool = True) -> int:
+        """Bulk-delete a conversation thread: all of its turns and, by default, its
+        thread summary. Returns the number of documents deleted.
+
+        This targets the conversation itself (turns + summary). Durable memories
+        distilled from the thread - facts, episodes, procedures - are user-scoped
+        knowledge and are left intact. Deletion is best-effort per document: a
+        concurrently-removed turn is skipped rather than aborting the whole sweep.
+        """
+        if not user_id:
+            raise ValidationError("user_id is required")
+        if not thread_id:
+            raise ValidationError("thread_id is required")
+
+        deleted = 0
+        turns = await self.get_thread(thread_id=thread_id, user_id=user_id, include_superseded=True) or []
+        for turn in turns:
+            turn_id = turn.get("id")
+            if not turn_id:
+                continue
+            try:
+                await self.delete_memory(turn_id, user_id=user_id, thread_id=thread_id, memory_type="turn")
+                deleted += 1
+            except MemoryNotFoundError:
+                continue
+
+        if include_summary and await self.delete_thread_summary(user_id, thread_id):
+            deleted += 1
+
+        return deleted
 
     async def search_cosmos(
         self,
@@ -725,6 +801,11 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         store = self._get_store()
         # Facts + episodes share one ranked query and one top_k budget: episodic
         # is added when include_episodes is True and stripped when it is False.
+        if memory_types is not None and "episodic" in memory_types and not include_episodes:
+            logger.warning(
+                "Episodic memories requested via memory_types are only returned when include_episodes=True; "
+                "proceeding without episodic memories and using facts or other requested memory types only."
+            )
         if memory_types is not None:
             base_memory_types = [t for t in memory_types if t != "episodic"]
         else:
@@ -967,7 +1048,8 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         return await self._get_store().remove_tags(memory_id, user_id, thread_id, memory_type, tags)
 
     async def get_procedural_prompt(self, user_id: str) -> Optional[str]:
-        return await self._get_store().get_procedural_prompt(user_id=user_id)
+        prompt = await self._get_pipeline().build_procedural_context(user_id)
+        return prompt or None
 
     async def get_procedural_history(self, user_id: str, limit: int = 10) -> list[dict[str, Any]]:
         return await self._get_store().get_procedural_history(user_id=user_id, limit=limit)
@@ -1004,8 +1086,31 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
             include_superseded,
         )
 
-    async def build_procedural_context(self, user_id: str) -> str:
-        return await self._get_pipeline().build_procedural_context(user_id)
+    async def retrieve_procedures(
+        self,
+        user_id: str,
+        search_terms: str,
+        top_k: int = 5,
+        *,
+        scope_type: Optional[str] = None,
+        scope_value: Optional[str] = None,
+        procedure_kind: Optional[str] = None,
+        status: Optional[str] = "active",
+        include_superseded: bool = False,
+    ) -> list[dict[str, Any]]:
+        return await self._get_store().retrieve_procedures(
+            user_id=user_id,
+            search_terms=search_terms,
+            top_k=top_k,
+            scope_type=scope_type,
+            scope_value=scope_value,
+            procedure_kind=procedure_kind,
+            status=status,
+            include_superseded=include_superseded,
+        )
+
+    async def build_procedural_context(self, user_id: str, task: Optional[str] = None) -> str:
+        return await self._get_pipeline().build_procedural_context(user_id, task)
 
     async def build_episodic_context(
         self,

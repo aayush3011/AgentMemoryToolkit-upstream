@@ -1,5 +1,33 @@
 ## Release History
 
+## [0.3.0b2] (Unreleased)
+
+#### Features Added
+* Episodic memory is now a first-class memory type. Bounded experiences are segmented from the turn stream at idle-gap, topic-drift, and max-size boundaries, each captured as an `EpisodicRecord` with a summary, timeline events, an optional outcome, and first-class `lessons`. See [PR:#37](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/37)
+* `search_cosmos(include_episodes=True)` blends facts and episodes into a single ranked query sharing one `top_k` budget, and `search_episodic_memories()` searches episodes directly. See [PR:#37](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/37)
+* Fact extraction now defaults to the higher-recall v2 prompt (`extract_memories-v2.prompty`); set `AMT_EXTRACT_MEMORIES_PROMPT=extract_memories.prompty` to fall back to v1. See [PR:#37](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/37)
+* Procedural memory is now an atomic, retrievable skill and policy library. `ProceduralRecord` stores individual procedures (behavioral policies, workflows, decision rules, tool-usage notes, recovery strategies) with scope, activation conditions, steps, status, and source provenance. See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
+* The Durable Functions backend now runs episodic extraction, driven by the Cosmos DB change feed on a per-thread cadence set via `EPISODE_EVAL_EVERY_N` (with `EPISODE_IDLE_GAP_SECONDS`, `EPISODE_TOPIC_DRIFT`, `EPISODE_MAX_TURNS`, and `EPISODE_MIN_TURNS` mirrored on the Functions side). See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
+* New delete helpers on both clients: `delete_turn()`, `delete_thread_summary()`, `delete_user_summary()`, and bulk `delete_thread()` (removes a thread's turns and, by default, its summary; distilled facts, episodes, and procedures are left intact). See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
+
+#### Breaking Changes
+* The default fact-extraction cadence is now every 2 turns (`FACT_EXTRACTION_EVERY_N=2`) instead of every turn, across the SDK, and the Functions deploy default. See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
+* `add_cosmos()` is renamed to `upsert_memory()` on both clients and the store; behavior is unchanged (write-or-replace by id). See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
+* `delete_cosmos()` is renamed to `delete_memory()`. See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
+* Procedural memory has been reshaped: `ProceduralRecord` is now an atomic procedure rather than a single compiled system-prompt document, and the compiled prompt is produced on demand by `build_procedural_context()`. Pre-existing single-prompt procedural documents from earlier betas are not migrated. See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
+* Write-time vector deduplication (in-place fold) has been removed, along with the `DEDUP_VECTOR_ENABLED` and similarity-threshold knobs. Fact dedup is now in-batch hash plus deterministic-id create/409; contradiction reconciliation is unchanged. See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
+
+#### Bugs Fixed
+* Episode extraction now isolates LLM failures: a transient error leaves the open segment un-stamped for retry, while a non-retryable error (content filter, context-length) quarantines the segment so it can neither wedge the thread nor grow it without bound. See [PR:#37](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/37)
+* Out-of-range or non-numeric fact `salience` / `confidence` values are clamped instead of aborting the whole extraction batch and stalling the fact watermark. See [PR:#37](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/37)
+* Segment time bounds and the open-episode-segment loader now order turns chronologically by parsed timestamp, so mixed UTC offsets and tied timestamps no longer invert episode bounds or destabilize the deterministic episode id. See [PR:#37](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/37)
+* Per-turn extraction watermarks are stamped with a single-field conditional patch, so concurrent fact and episode writers no longer clobber each other's watermark field. See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
+* `parse_llm_json` now rejects a non-object JSON root with a typed error instead of letting it surface downstream as a misclassified transient failure. See [PR:#37](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/37)
+* Threshold environment values of `NaN` / `inf` are rejected instead of silently disabling the affected boundary. See [PR:#37](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/37)
+
+#### Other Changes
+* Fact hash-dedup no longer issues a per-extraction query to preload the user's existing fact hashes; exact duplicates are caught in-batch and by the deterministic-id create (409), reducing per-turn latency. See [PR:#38](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/38)
+
 ## [0.3.0b1] (2026-07-24)
 
 #### Features Added
@@ -23,42 +51,21 @@
 ## [0.2.0b3] (2026-07-08)
 
 #### Features Added
-* A custom user-agent can now be supplied via the new `user_agent` constructor
-  argument on `CosmosMemoryClient` and `AsyncCosmosMemoryClient`. The toolkit's
-  own user-agent (`azsdk-python-cosmos-agent-memory/<version>`) is always sent to
-  Azure Cosmos DB so usage can be tracked; when a custom value is provided it is prefixed and
-  the toolkit's user-agent is suffixed behind it (`"<custom> <toolkit>"`). See [PR:#30](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/30)
-* Per-turn processing cadence can now be set in-process via the new
-  `cadence_thresholds` constructor argument on `CosmosMemoryClient` and
-  `AsyncCosmosMemoryClient`, instead of only through environment variables. Pass a
-  mapping keyed by the same names as the env vars (e.g. `FACT_EXTRACTION_EVERY_N`,
-  `DEDUP_EVERY_N`, `THREAD_SUMMARY_EVERY_N`, `USER_SUMMARY_EVERY_N`); any key not
-  present falls back to the environment/defaults, and `None` preserves today's
-  env-only behavior. See [PR:#29](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/29)
+* A custom user-agent can now be supplied via the new `user_agent` constructor argument on `CosmosMemoryClient` and `AsyncCosmosMemoryClient`. The toolkit's own user-agent (`azsdk-python-cosmos-agent-memory/<version>`) is always sent to Azure Cosmos DB so usage can be tracked; when a custom value is provided it is prefixed and the toolkit's user-agent is suffixed behind it (`"<custom> <toolkit>"`). See [PR:#30](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/30)
+* Per-turn processing cadence can now be set in-process via the new `cadence_thresholds` constructor argument on `CosmosMemoryClient` and `AsyncCosmosMemoryClient`, instead of only through environment variables. Pass a mapping keyed by the same names as the env vars (e.g. `FACT_EXTRACTION_EVERY_N`,`DEDUP_EVERY_N`, `THREAD_SUMMARY_EVERY_N`, `USER_SUMMARY_EVERY_N`); any key not present falls back to the environment/defaults, and `None` preserves today's env-only behavior. See [PR:#29](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/29)
 ## [0.2.0b2] (2026-07-01)
 
 #### Features Added
-* Embeddings and chat clients can now be injected via the new `embeddings_client`
-  and `chat_client` constructor arguments on `CosmosMemoryClient` and
-  `AsyncCosmosMemoryClient`. See [PR:#27](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/27)
+* Embeddings and chat clients can now be injected via the new `embeddings_client` and `chat_client` constructor arguments on `CosmosMemoryClient` and `AsyncCosmosMemoryClient`. See [PR:#27](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/27)
 
 ## [0.2.0b1] (2026-06-30)
 
 #### Features Added
-* Raw conversation turns can now be embedded and vector-searched. Set
-  `enable_turn_embeddings=True` (env `ENABLE_TURN_EMBEDDINGS`) to generate an
-  embedding when each turn is written, then call `search_turns()` (sync and
-  async, on both the client and store) to semantically search the raw turn
-  log. See [PR:#22](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/22/)
+* Raw conversation turns can now be embedded and vector-searched. Set `enable_turn_embeddings=True` (env `ENABLE_TURN_EMBEDDINGS`) to generate an embedding when each turn is written, then call `search_turns()` (sync and async, on both the client and store) to semantically search the raw turn log. See [PR:#22](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/22/)
 
 #### Other Changes
-* The memories container's vector index type is now configurable instead of being
-  hard-coded to `diskANN`. Set it via the `vector_index_type` argument to
-  `create_memory_store(...)` or the `AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE`
-  environment variable. See [PR:#24](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/24)
-* `ai_foundry_endpoint` now accepts a project-scoped Azure AI Foundry URL
-  (`https://<resource>.services.ai.azure.com/api/projects/<name>`) in addition
-  to the account-level inference endpoint. See [PR:#23](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/23)
+* The memories container's vector index type is now configurable instead of being hard-coded to `diskANN`. Set it via the `vector_index_type` argument to `create_memory_store(...)` or the `AI_FOUNDRY_EMBEDDING_VECTOR_INDEX_TYPE` environment variable. See [PR:#24](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/24)
+* `ai_foundry_endpoint` now accepts a project-scoped Azure AI Foundry URL (`https://<resource>.services.ai.azure.com/api/projects/<name>`) in addition to the account-level inference endpoint. See [PR:#23](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/23)
 
 ## [0.1.0b2] (2026-06-03)
 
@@ -72,39 +79,21 @@
 
 ## [0.1.0b1] - 2026-06-01
 
-
 Initial public preview release.
 
-This is a **beta release**. The public surface may evolve in
-backward-incompatible ways before the `1.0.0` general-availability cut.
+This is a **beta release**. The public surface may evolve in backward-incompatible ways before the `1.0.0` general-availability cut.
 Pin a specific version when integrating.
 
 #### Added
 
-- Sync (`CosmosMemoryClient`) and async (`AsyncCosmosMemoryClient`) clients
-  for storing, retrieving, and transforming agent memories backed by Azure
-  Cosmos DB.
-- Typed memory record hierarchy (Pydantic): `TurnRecord`, `FactRecord`,
-  `EpisodicRecord`, `ProceduralRecord`, `ThreadSummaryRecord`,
-  `UserSummaryRecord`.
-- Vector + full-text + hybrid search over memories with metadata filters,
-  tag filters, and per-type scoping.
-- Built-in memory processing pipeline: fact extraction, thread/user
-  summarization, procedural-memory synthesis, contradiction handling, and
-  deduplication - all driven by versioned `.prompty` prompts.
-- Two processor backends: `InProcessProcessor` (default, runs in your
-  application process) and `DurableFunctionProcessor` (offloads work to a
-  sibling Azure Function app via Cosmos DB change feed).
-- One-command `azd up` deployment that provisions Cosmos DB (with vector +
-  full-text search enabled), Azure AI Foundry (chat + embedding
-  deployments), Azure Function app (Flex Consumption), Storage, App
-  Insights, and the User-Assigned Managed Identity wiring all of it
-  together.
-- Focused exception hierarchy: `AgentMemoryError`, `ConfigurationError`,
-  `ValidationError`, `CosmosNotConnectedError`, `CosmosOperationError`,
-  `MemoryNotFoundError`, `MemoryTypeMismatchError`, `LLMError`.
-- Structured JSON logging via `azure.cosmos.agent_memory.logging`
-  (`configure_logging`, `JsonFormatter`).
+- Sync (`CosmosMemoryClient`) and async (`AsyncCosmosMemoryClient`) clients for storing, retrieving, and transforming agent memories backed by Azure Cosmos DB.
+- Typed memory record hierarchy (Pydantic): `TurnRecord`, `FactRecord`, `EpisodicRecord`, `ProceduralRecord`, `ThreadSummaryRecord`, `UserSummaryRecord`.
+- Vector + full-text + hybrid search over memories with metadata filters, tag filters, and per-type scoping.
+- Built-in memory processing pipeline: fact extraction, thread/user summarization, procedural-memory synthesis, contradiction handling, and deduplication - all driven by versioned `.prompty` prompts.
+- Two processor backends: `InProcessProcessor` (default, runs in your application process) and `DurableFunctionProcessor` (offloads work to a sibling Azure Function app via Cosmos DB change feed).
+- One-command `azd up` deployment that provisions Cosmos DB (with vector + full-text search enabled), Azure AI Foundry (chat + embedding deployments), Azure Function app (Flex Consumption), Storage, App Insights, and the User-Assigned Managed Identity wiring all of it together.
+- Focused exception hierarchy: `AgentMemoryError`, `ConfigurationError`, `ValidationError`, `CosmosNotConnectedError`, `CosmosOperationError`, `MemoryNotFoundError`, `MemoryTypeMismatchError`, `LLMError`.
+- Structured JSON logging via `azure.cosmos.agent_memory.logging` (`configure_logging`, `JsonFormatter`).
 
 #### Package layout
 

@@ -98,12 +98,13 @@ async def test_extract_episodes_embeds_content_persists_append_only(monkeypatch)
             "The user planned a vacation.",
         ]
     ]
-    assert [doc["content"] for doc in store.docs] == [
+    episodes = [doc for doc in store.docs if doc.get("type") == "episodic"]
+    assert [doc["content"] for doc in episodes] == [
         "The user fixed flaky CI retries and the tests passed.",
         "The user planned a vacation.",
     ]
-    assert all(doc["id"].startswith("ep_") for doc in store.docs)
-    assert all(doc["embedding"] == [1.0] for doc in store.docs)
+    assert all(doc["id"].startswith("ep_") for doc in episodes)
+    assert all(doc["embedding"] == [1.0] for doc in episodes)
     assert store.supersede_calls == []
     assert store.search_calls == []
 
@@ -116,7 +117,7 @@ async def test_extract_episodes_empty_window_persists_nothing(monkeypatch) -> No
     result = await service.extract_episodes("u1", "t1", flush=True)
 
     assert result == {"episodes": 0}
-    assert store.docs == []
+    assert [doc for doc in store.docs if doc.get("type") == "episodic"] == []
     assert embeddings.calls == []
 
 
@@ -138,7 +139,7 @@ async def test_extract_episodes_skips_malformed_episode_with_warning(caplog, mon
         result = await service.extract_episodes("u1", "t1", flush=True)
 
     assert result == {"episodes": 1}
-    assert [doc["title"] for doc in store.docs] == ["Valid episode"]
+    assert [doc["title"] for doc in store.docs if doc.get("type") == "episodic"] == ["Valid episode"]
     assert "dropping malformed episode" in caplog.text
 
 
@@ -202,8 +203,8 @@ async def test_extract_episodes_skips_duplicate_when_segment_reprocessed(monkeyp
     )
 
     assert await service.extract_episodes("u1", "t1", flush=True) == {"episodes": 1}
-    for turn in turns.docs:
-        turn.pop("episode_extracted_at", None)
+    # Simulate a crash before the cursor advanced: the watermark never moved.
+    store.docs = [doc for doc in store.docs if doc.get("type") != "episode_cursor"]
     assert await service.extract_episodes("u1", "t1", flush=True) == {"episodes": 0}
     episodic = [doc for doc in store.docs if doc.get("type") == "episodic"]
     assert len(episodic) == 1

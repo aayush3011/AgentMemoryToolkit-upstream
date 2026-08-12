@@ -59,7 +59,7 @@ def main() -> None:
         ("user", "Sounds great. I love simple Italian food, especially fresh ingredients."),
         ("agent", "Italian cuisine emphasises quality ingredients prepared simply."),
     ]:
-        mem.add_cosmos(user_id=user_id, role=role, content=content, thread_id=t1)
+        mem.upsert_memory(user_id=user_id, role=role, content=content, thread_id=t1)
 
     mem.extract_memories(user_id=user_id, thread_id=t1)
     mem.generate_thread_summary(user_id=user_id, thread_id=t1)
@@ -73,7 +73,7 @@ def main() -> None:
         ("user", "Perfect - I love wine, especially Chianti and Brunello."),
         ("agent", "Brunello di Montalcino producers offer wonderful cellar tours."),
     ]:
-        mem.add_cosmos(user_id=user_id, role=role, content=content, thread_id=t2)
+        mem.upsert_memory(user_id=user_id, role=role, content=content, thread_id=t2)
 
     mem.extract_memories(user_id=user_id, thread_id=t2)
     mem.generate_thread_summary(user_id=user_id, thread_id=t2)
@@ -87,7 +87,7 @@ def main() -> None:
         ("user", "Cool. I'm a Python engineer building AI tooling."),
         ("agent", "Azure has excellent AI services - AI Foundry, AI Search, Cosmos DB for vectors."),
     ]:
-        mem.add_cosmos(user_id=user_id, role=role, content=content, thread_id=t3)
+        mem.upsert_memory(user_id=user_id, role=role, content=content, thread_id=t3)
 
     mem.extract_memories(user_id=user_id, thread_id=t3)
     mem.generate_thread_summary(user_id=user_id, thread_id=t3)

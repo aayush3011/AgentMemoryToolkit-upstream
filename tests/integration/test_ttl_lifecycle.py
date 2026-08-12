@@ -80,7 +80,7 @@ def _delete_if_present(
     client: CosmosMemoryClient, memory_id: str, user_id: str, thread_id: str, memory_type: str
 ) -> None:
     try:
-        client.delete_cosmos(memory_id=memory_id, user_id=user_id, thread_id=thread_id, memory_type=memory_type)
+        client.delete_memory(memory_id=memory_id, user_id=user_id, thread_id=thread_id, memory_type=memory_type)
     except Exception:
         pass
 
@@ -91,7 +91,7 @@ def test_turn_ttl_expires_while_episodic_persists(ttl_client: CosmosMemoryClient
     turn_id = ""
     episodic_id = ""
     try:
-        turn_id = ttl_client.add_cosmos(
+        turn_id = ttl_client.upsert_memory(
             user_id=user_id,
             role="user",
             content="temporary turn",
@@ -99,7 +99,7 @@ def test_turn_ttl_expires_while_episodic_persists(ttl_client: CosmosMemoryClient
             thread_id=thread_id,
             ttl=60,
         )
-        episodic_id = ttl_client.add_cosmos(
+        episodic_id = ttl_client.upsert_memory(
             user_id=user_id,
             role="system",
             content="durable episodic memory",

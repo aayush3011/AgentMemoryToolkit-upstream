@@ -172,6 +172,87 @@ EXTRACT_EPISODE_SCHEMA: dict[str, Any] = {
 
 
 # ---------------------------------------------------------------------------
+# extract_procedure.prompty - distill atomic procedural memories (skills/rules)
+# ---------------------------------------------------------------------------
+_PROCEDURE_STEP = {
+    "type": "object",
+    "properties": {
+        "sequence": {"type": "integer"},
+        "instruction": {"type": "string"},
+        "expected_result": {"type": ["string", "null"]},
+        "on_failure": {"type": ["string", "null"]},
+        "tool_name": {"type": ["string", "null"]},
+    },
+    "required": ["sequence", "instruction", "expected_result", "on_failure", "tool_name"],
+    "additionalProperties": False,
+}
+
+_PROCEDURE_ITEM = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string"},
+        "summary": {"type": "string"},
+        "retrieval_text": {"type": "string"},
+        "procedure_kind": {
+            "type": "string",
+            "enum": ["behavioral_policy", "workflow", "decision_rule", "tool_usage", "recovery_strategy"],
+        },
+        "scope_type": {
+            "type": "string",
+            "enum": ["global", "user", "agent", "domain", "project", "workflow", "tool"],
+        },
+        "scope_value": {"type": ["string", "null"]},
+        "activation_conditions": {"type": "array", "items": {"type": "string"}},
+        "preconditions": {"type": "array", "items": {"type": "string"}},
+        "steps": {"type": "array", "items": _PROCEDURE_STEP},
+        "success_conditions": {"type": "array", "items": {"type": "string"}},
+        "failure_conditions": {"type": "array", "items": {"type": "string"}},
+        "safety_constraints": {"type": "array", "items": {"type": "string"}},
+        "source_kind": {
+            "type": "string",
+            "enum": [
+                "explicit_user_instruction",
+                "observed_user_preference",
+                "organization_policy",
+                "episode_distillation",
+                "document_content",
+                "agent_inference",
+            ],
+        },
+        "grounded_in": {"type": "array", "items": {"type": "string"}},
+        "confidence": {"type": "number"},
+    },
+    "required": [
+        "name",
+        "summary",
+        "retrieval_text",
+        "procedure_kind",
+        "scope_type",
+        "scope_value",
+        "activation_conditions",
+        "preconditions",
+        "steps",
+        "success_conditions",
+        "failure_conditions",
+        "safety_constraints",
+        "source_kind",
+        "grounded_in",
+        "confidence",
+    ],
+    "additionalProperties": False,
+}
+
+EXTRACT_PROCEDURE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "procedures": {"type": "array", "items": _PROCEDURE_ITEM},
+    },
+    "required": ["procedures"],
+    "additionalProperties": False,
+}
+
+
+# ---------------------------------------------------------------------------
 # summarize.prompty - first-pass thread summary
 #
 # Mirrors the 6-field shape the prompty actually instructs the model to emit
@@ -281,6 +362,7 @@ SYNTHESIZE_PROCEDURAL_SCHEMA: dict[str, Any] = {
 PROMPTY_SCHEMAS: dict[str, tuple[str, dict[str, Any]]] = {
     "dedup.prompty": ("DedupOutput", DEDUP_SCHEMA),
     "extract_episode.prompty": ("ExtractEpisodesOutput", EXTRACT_EPISODE_SCHEMA),
+    "extract_procedure.prompty": ("ExtractProceduresOutput", EXTRACT_PROCEDURE_SCHEMA),
     "extract_memories.prompty": ("ExtractMemoriesOutput", EXTRACT_MEMORIES_SCHEMA),
     "extract_memories-v2.prompty": ("ExtractMemoriesOutput", EXTRACT_MEMORIES_SCHEMA),
     "summarize.prompty": ("SummarizeOutput", SUMMARIZE_SCHEMA),

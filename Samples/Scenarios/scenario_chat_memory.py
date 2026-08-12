@@ -116,7 +116,7 @@ def run_session(
     print()
 
     for role, content in turns:
-        mem.add_cosmos(
+        mem.upsert_memory(
             user_id=user_id,
             role=role,
             content=content,
@@ -223,7 +223,7 @@ def main() -> None:
         ),
     ]
     for role, content in new_turns:
-        mem.add_cosmos(
+        mem.upsert_memory(
             user_id=user_id,
             role=role,
             content=content,
@@ -236,7 +236,7 @@ def main() -> None:
     # ── Summary ───────────────────────────────────────────────
     banner("Done")
     print("  This sample demonstrated:")
-    print("    • Storing multi-turn conversations with add_cosmos")
+    print("    • Storing multi-turn conversations with upsert_memory")
     print("    • Retrieving a full thread with get_thread")
     print("    • Searching across sessions with search_cosmos")
     print("    • Using recalled context to inform new sessions")

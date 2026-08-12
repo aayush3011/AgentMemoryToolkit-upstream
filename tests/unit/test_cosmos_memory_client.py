@@ -591,12 +591,12 @@ class TestCreateMemoryStore:
 
 
 class TestAddCosmos:
-    def test_add_cosmos(self):
+    def test_upsert_memory(self):
         mem, container = _connected_client()
         # Suppress cadence work - the trigger path is exercised in
         # tests/unit/test_auto_trigger.py; this test just asserts the CRUD write.
         mem._maybe_auto_trigger = MagicMock()
-        mem.add_cosmos(user_id="u1", role="user", content="hello", thread_id="t1")
+        mem.upsert_memory(user_id="u1", role="user", content="hello", thread_id="t1")
 
         turns = mem._turns_container_client
         turns.upsert_item.assert_called_once()
@@ -605,10 +605,10 @@ class TestAddCosmos:
         assert body["user_id"] == "u1"
         assert body["role"] == "user"
 
-    def test_add_cosmos_threads_explicit_created_at(self):
+    def test_upsert_memory_threads_explicit_created_at(self):
         mem, container = _connected_client()
         mem._maybe_auto_trigger = MagicMock()
-        mem.add_cosmos(
+        mem.upsert_memory(
             user_id="u1",
             role="user",
             content="hello",
@@ -619,47 +619,47 @@ class TestAddCosmos:
         body = mem._turns_container_client.upsert_item.call_args.kwargs["body"]
         assert body["created_at"] == "2024-03-01T12:00:00+00:00"
 
-    def test_add_cosmos_not_connected(self):
+    def test_upsert_memory_not_connected(self):
         mem = _make_client()
         with pytest.raises(CosmosNotConnectedError):
-            mem.add_cosmos(user_id="u1", role="user", content="hi", thread_id="t1")
+            mem.upsert_memory(user_id="u1", role="user", content="hi", thread_id="t1")
 
-    def test_add_cosmos_turn_requires_thread_id(self):
+    def test_upsert_memory_turn_requires_thread_id(self):
         """Turn writes must declare a thread_id so the auto-trigger counter can group them."""
         mem, _ = _connected_client()
         with pytest.raises(ValidationError, match="thread_id is required"):
-            mem.add_cosmos(user_id="u1", role="user", content="hi")  # memory_type='turn' default
+            mem.upsert_memory(user_id="u1", role="user", content="hi")  # memory_type='turn' default
 
-    def test_add_cosmos_non_turn_does_not_require_thread_id(self):
+    def test_upsert_memory_non_turn_does_not_require_thread_id(self):
         """Non-turn writes (facts, episodics, etc.) work without thread_id and skip cadence."""
         mem, container = _connected_client()
         trigger = MagicMock()
         mem._maybe_auto_trigger = trigger
 
-        mem.add_cosmos(user_id="u1", role="user", content="prefers dark mode", memory_type="fact")
+        mem.upsert_memory(user_id="u1", role="user", content="prefers dark mode", memory_type="fact")
 
         container.upsert_item.assert_called_once()
         trigger.assert_not_called()
 
-    def test_add_cosmos_turn_triggers_cadence(self):
+    def test_upsert_memory_turn_triggers_cadence(self):
         """A turn write must bump the auto-trigger counter so cadence env vars apply
         whether the caller uses the local buffer or writes through directly."""
         mem, _ = _connected_client()
         trigger = MagicMock()
         mem._maybe_auto_trigger = trigger
 
-        mem.add_cosmos(user_id="u1", role="user", content="hello", thread_id="t1")
+        mem.upsert_memory(user_id="u1", role="user", content="hello", thread_id="t1")
 
         trigger.assert_called_once_with({("u1", "t1"): 1})
 
-    def test_add_cosmos_swallows_cadence_failure(self):
-        """If the cadence trigger raises, the add_cosmos call must still succeed -
+    def test_upsert_memory_swallows_cadence_failure(self):
+        """If the cadence trigger raises, the upsert_memory call must still succeed -
         the user's turn was written; cadence is best-effort telemetry."""
         mem, _ = _connected_client()
         mem._maybe_auto_trigger = MagicMock(side_effect=RuntimeError("boom"))
 
         # Should NOT raise - the write succeeded.
-        result_id = mem.add_cosmos(user_id="u1", role="user", content="hi", thread_id="t1")
+        result_id = mem.upsert_memory(user_id="u1", role="user", content="hi", thread_id="t1")
 
         assert isinstance(result_id, str)
         mem._turns_container_client.upsert_item.assert_called_once()
@@ -951,7 +951,7 @@ class TestDeleteCosmos:
         container.read_item = MagicMock(return_value=_make_doc(id="m1", type="fact"))
         container.delete_item = MagicMock()
 
-        mem.delete_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
+        mem.delete_memory(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
 
         container.delete_item.assert_called_once_with(item="m1", partition_key=["u1", "t1"])
 
@@ -963,7 +963,7 @@ class TestDeleteCosmos:
         container.delete_item = MagicMock()
 
         with pytest.raises(MemoryNotFoundError):
-            mem.delete_cosmos(memory_id="nope", user_id="u1", thread_id="t1", memory_type="fact")
+            mem.delete_memory(memory_id="nope", user_id="u1", thread_id="t1", memory_type="fact")
 
         container.delete_item.assert_not_called()
 
@@ -1171,7 +1171,7 @@ class TestCosmosGuard:
         with pytest.raises(CosmosNotConnectedError):
             mem.update_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
         with pytest.raises(CosmosNotConnectedError):
-            mem.delete_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
+            mem.delete_memory(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
 
 
 # ===================================================================
@@ -1271,3 +1271,68 @@ class TestSyncCadenceThresholdsNormalization:
     def test_non_mapping_rejected(self):
         with pytest.raises(TypeError):
             CosmosMemoryClient(use_default_credential=False, cadence_thresholds=[("DEDUP_EVERY_N", 5)])
+
+
+class TestDeleteHelpers:
+    def test_delete_turn_delegates_with_turn_type(self):
+        mem = _make_client()
+        mem.delete_memory = MagicMock()
+        mem.delete_turn("turn-1", user_id="u1", thread_id="t1")
+        mem.delete_memory.assert_called_once_with("turn-1", user_id="u1", thread_id="t1", memory_type="turn")
+
+    def test_delete_thread_summary_uses_deterministic_id_and_returns_true(self):
+        mem = _make_client()
+        mem.delete_memory = MagicMock()
+        assert mem.delete_thread_summary("u1", "t1") is True
+        mem.delete_memory.assert_called_once_with(
+            "summary_u1_t1", user_id="u1", thread_id="t1", memory_type="thread_summary"
+        )
+
+    def test_delete_thread_summary_missing_returns_false(self):
+        mem = _make_client()
+        mem.delete_memory = MagicMock(side_effect=MemoryNotFoundError(memory_id="x", user_id="u1", thread_id="t1"))
+        assert mem.delete_thread_summary("u1", "t1") is False
+
+    def test_delete_user_summary_uses_deterministic_id_and_scope(self):
+        mem = _make_client()
+        mem.delete_memory = MagicMock()
+        assert mem.delete_user_summary("u1") is True
+        mem.delete_memory.assert_called_once_with(
+            "user_summary_u1", user_id="u1", thread_id="__user_summary__", memory_type="user_summary"
+        )
+
+    def test_delete_thread_deletes_turns_and_summary_and_counts(self):
+        mem = _make_client()
+        mem.get_thread = MagicMock(return_value=[{"id": "turn-1"}, {"id": "turn-2"}])
+        mem.delete_memory = MagicMock()
+        deleted = mem.delete_thread("u1", "t1")
+        assert deleted == 3  # 2 turns + 1 summary
+        assert mem.get_thread.call_args.kwargs["include_superseded"] is True
+        turn_deletes = [c for c in mem.delete_memory.call_args_list if c.kwargs.get("memory_type") == "turn"]
+        assert len(turn_deletes) == 2
+
+    def test_delete_thread_without_summary(self):
+        mem = _make_client()
+        mem.get_thread = MagicMock(return_value=[{"id": "turn-1"}])
+        mem.delete_memory = MagicMock()
+        deleted = mem.delete_thread("u1", "t1", include_summary=False)
+        assert deleted == 1
+
+    def test_delete_thread_skips_missing_turn(self):
+        mem = _make_client()
+        mem.get_thread = MagicMock(return_value=[{"id": "turn-1"}, {"id": "turn-2"}])
+
+        def _delete(memory_id, **kwargs):
+            if memory_id == "turn-1":
+                raise MemoryNotFoundError(memory_id="turn-1", user_id="u1", thread_id="t1")
+
+        mem.delete_memory = MagicMock(side_effect=_delete)
+        deleted = mem.delete_thread("u1", "t1", include_summary=False)
+        assert deleted == 1  # turn-2 only
+
+    def test_delete_thread_requires_ids(self):
+        mem = _make_client()
+        with pytest.raises(ValidationError):
+            mem.delete_thread("", "t1")
+        with pytest.raises(ValidationError):
+            mem.delete_thread("u1", "")

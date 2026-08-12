@@ -546,11 +546,11 @@ class TestValidateTopology:
 
 
 class TestAddCosmos:
-    async def test_add_cosmos(self):
+    async def test_upsert_memory(self):
         mem, container = _connected_client()
         # Suppress the background cadence task to keep the test focused on the CRUD write.
         mem._maybe_auto_trigger = AsyncMock()
-        await mem.add_cosmos(user_id="u1", role="user", content="hello", thread_id="t1")
+        await mem.upsert_memory(user_id="u1", role="user", content="hello", thread_id="t1")
         # Drain any pending background tasks (none expected since we stubbed the trigger).
         await asyncio.gather(*list(mem._background_tasks), return_exceptions=True)
 
@@ -560,37 +560,37 @@ class TestAddCosmos:
         assert body["content"] == "hello"
         assert body["user_id"] == "u1"
 
-    async def test_add_cosmos_not_connected(self):
+    async def test_upsert_memory_not_connected(self):
         mem = _make_client()
         with pytest.raises(CosmosNotConnectedError):
-            await mem.add_cosmos(user_id="u1", role="user", content="hi", thread_id="t1")
+            await mem.upsert_memory(user_id="u1", role="user", content="hi", thread_id="t1")
 
-    async def test_add_cosmos_turn_requires_thread_id(self):
+    async def test_upsert_memory_turn_requires_thread_id(self):
         """Turn writes must declare a thread_id so the auto-trigger counter can group them."""
         mem, _ = _connected_client()
         with pytest.raises(ValidationError, match="thread_id is required"):
-            await mem.add_cosmos(user_id="u1", role="user", content="hi")  # memory_type='turn' default
+            await mem.upsert_memory(user_id="u1", role="user", content="hi")  # memory_type='turn' default
 
-    async def test_add_cosmos_non_turn_does_not_require_thread_id(self):
+    async def test_upsert_memory_non_turn_does_not_require_thread_id(self):
         """Non-turn writes (facts, episodics, etc.) work without thread_id and skip cadence."""
         mem, container = _connected_client()
         trigger = AsyncMock()
         mem._maybe_auto_trigger = trigger
 
-        await mem.add_cosmos(user_id="u1", role="user", content="prefers dark mode", memory_type="fact")
+        await mem.upsert_memory(user_id="u1", role="user", content="prefers dark mode", memory_type="fact")
         await asyncio.gather(*list(mem._background_tasks), return_exceptions=True)
 
         container.upsert_item.assert_awaited_once()
         trigger.assert_not_awaited()
 
-    async def test_add_cosmos_turn_schedules_cadence(self):
+    async def test_upsert_memory_turn_schedules_cadence(self):
         """A turn write must schedule the auto-trigger as a background task so cadence
         env vars apply whether the caller uses the local buffer or writes through directly."""
         mem, _ = _connected_client()
         trigger = AsyncMock()
         mem._maybe_auto_trigger = trigger
 
-        await mem.add_cosmos(user_id="u1", role="user", content="hello", thread_id="t1")
+        await mem.upsert_memory(user_id="u1", role="user", content="hello", thread_id="t1")
         # Drain the background task so the AsyncMock records the call.
         await asyncio.gather(*list(mem._background_tasks), return_exceptions=True)
 
@@ -723,7 +723,7 @@ class TestDeleteCosmos:
         container.read_item = AsyncMock(return_value=_make_doc(id="m1", type="fact"))
         container.delete_item = AsyncMock()
 
-        await mem.delete_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
+        await mem.delete_memory(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
 
         container.delete_item.assert_awaited_once_with(item="m1", partition_key=["u1", "t1"])
 
@@ -735,7 +735,7 @@ class TestDeleteCosmos:
         container.delete_item = AsyncMock()
 
         with pytest.raises(MemoryNotFoundError):
-            await mem.delete_cosmos(memory_id="x", user_id="u1", thread_id="t1", memory_type="fact")
+            await mem.delete_memory(memory_id="x", user_id="u1", thread_id="t1", memory_type="fact")
 
         container.delete_item.assert_not_awaited()
 
@@ -781,7 +781,7 @@ class TestCosmosGuard:
         with pytest.raises(CosmosNotConnectedError):
             await mem.update_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
         with pytest.raises(CosmosNotConnectedError):
-            await mem.delete_cosmos(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
+            await mem.delete_memory(memory_id="m1", user_id="u1", thread_id="t1", memory_type="fact")
 
 
 # ===================================================================
@@ -1079,3 +1079,60 @@ class TestAsyncSearchCosmosUnifiedRetrieval:
 
         assert out == [{"content": "s", "type": "user_summary"}]
         store.search_summaries.assert_awaited_once()
+
+
+class TestAsyncDeleteHelpers:
+    @pytest.mark.asyncio
+    async def test_delete_turn_delegates_with_turn_type(self):
+        mem = _make_client()
+        mem.delete_memory = AsyncMock()
+        await mem.delete_turn("turn-1", user_id="u1", thread_id="t1")
+        mem.delete_memory.assert_awaited_once_with("turn-1", user_id="u1", thread_id="t1", memory_type="turn")
+
+    @pytest.mark.asyncio
+    async def test_delete_thread_summary_returns_true_then_false(self):
+        mem = _make_client()
+        mem.delete_memory = AsyncMock()
+        assert await mem.delete_thread_summary("u1", "t1") is True
+        mem.delete_memory.assert_awaited_once_with(
+            "summary_u1_t1", user_id="u1", thread_id="t1", memory_type="thread_summary"
+        )
+        mem.delete_memory = AsyncMock(side_effect=MemoryNotFoundError(memory_id="x", user_id="u1", thread_id="t1"))
+        assert await mem.delete_thread_summary("u1", "t1") is False
+
+    @pytest.mark.asyncio
+    async def test_delete_user_summary_uses_deterministic_id_and_scope(self):
+        mem = _make_client()
+        mem.delete_memory = AsyncMock()
+        assert await mem.delete_user_summary("u1") is True
+        mem.delete_memory.assert_awaited_once_with(
+            "user_summary_u1", user_id="u1", thread_id="__user_summary__", memory_type="user_summary"
+        )
+
+    @pytest.mark.asyncio
+    async def test_delete_thread_deletes_turns_and_summary_and_counts(self):
+        mem = _make_client()
+        mem.get_thread = AsyncMock(return_value=[{"id": "turn-1"}, {"id": "turn-2"}])
+        mem.delete_memory = AsyncMock()
+        deleted = await mem.delete_thread("u1", "t1")
+        assert deleted == 3  # 2 turns + 1 summary
+        assert mem.get_thread.call_args.kwargs["include_superseded"] is True
+
+    @pytest.mark.asyncio
+    async def test_delete_thread_skips_missing_turn(self):
+        mem = _make_client()
+        mem.get_thread = AsyncMock(return_value=[{"id": "turn-1"}, {"id": "turn-2"}])
+
+        async def _delete(memory_id, **kwargs):
+            if memory_id == "turn-1":
+                raise MemoryNotFoundError(memory_id="turn-1", user_id="u1", thread_id="t1")
+
+        mem.delete_memory = AsyncMock(side_effect=_delete)
+        deleted = await mem.delete_thread("u1", "t1", include_summary=False)
+        assert deleted == 1
+
+    @pytest.mark.asyncio
+    async def test_delete_thread_requires_ids(self):
+        mem = _make_client()
+        with pytest.raises(ValidationError):
+            await mem.delete_thread("", "t1")
