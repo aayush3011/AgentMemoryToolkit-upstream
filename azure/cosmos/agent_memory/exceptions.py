@@ -39,6 +39,21 @@ class ValidationError(AgentMemoryError):
     error_code = "validation"
 
 
+class NoSourceMemoriesError(ValidationError):
+    """Raised by the durable summary path when a user has no source memories yet.
+
+    A brand-new user can cross the user-summary threshold before fact extraction
+    has persisted anything, because the change feed starts the extract and
+    user-summary orchestrations independently. Subclasses :class:`ValidationError`
+    so existing ``except ValidationError`` handlers keep catching it, while
+    letting the Durable user-summary orchestrator tell this expected "extraction
+    has not landed yet" race apart from a real validation failure and wait/retry
+    instead of failing after its short activity-retry window.
+    """
+
+    error_code = "no_source_memories"
+
+
 class CosmosNotConnectedError(AgentMemoryError):
     """Raised when a Cosmos DB operation is attempted without an active connection."""
 

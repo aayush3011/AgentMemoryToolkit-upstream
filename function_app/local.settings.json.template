@@ -31,6 +31,10 @@
     "// --- Batch knob ---": "",
     "MAX_BATCH_SIZE": "20",
 
+    "// --- UserSummaryOrchestrator waits this long (seconds) for extraction to persist the first memories of a brand-new user before skipping the cadence; polls every interval. ---": "",
+    "USER_SUMMARY_WAIT_SECONDS": "120",
+    "USER_SUMMARY_WAIT_INTERVAL_SECONDS": "10",
+
     "// --- Turn vector search: embed raw turns on write so search_turns() works. Turns container is always vector-indexed; default false. ---": "",
     "ENABLE_TURN_EMBEDDINGS": "false"
   }

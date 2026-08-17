@@ -28,10 +28,9 @@ from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory._utils import (
     DEFAULT_TTL_BY_TYPE,
     compute_content_hash,
-    distance_function_from_container_properties,
-    vector_order_direction,
 )
 from azure.cosmos.agent_memory.exceptions import (
+    NoSourceMemoriesError,
     ValidationError,
 )
 from azure.cosmos.agent_memory.logging import get_logger
@@ -282,125 +281,6 @@ class PipelineService:
             metadata_keys=getattr(self, "_transcript_metadata_keys", None),
             include_timestamp=include_timestamp,
         )
-
-    def _vector_distance_function(self) -> str:
-        """Return the container's configured Cosmos ``distanceFunction`` (cached).
-
-        Read from the container's vector embedding policy (``container.read()``) -
-        the authoritative, immutable source set when the container was created.
-        Drives the ORDER BY direction and similarity-threshold comparisons so dedup
-        never silently assumes cosine. Falls back to cosine when the policy can't be
-        read (e.g. ``__new__``-built test instances with mocked containers).
-        """
-        fn = getattr(self, "_distance_function_cache", None)
-        if fn is not None:
-            return fn
-        try:
-            props = self._memories_container.read()
-        except Exception:
-            # Transient read failure (429/503/connection) is indistinguishable from
-            # "no policy" once we drop to None - so DON'T cache here. Returning an
-            # uncached cosine default lets the next call self-heal; caching it would
-            # pin cosine for the instance's life and silently mis-handle a euclidean
-            # container (cosine bands applied to euclidean distances -> data loss).
-            # Flag the failure so the *destructive* in-place fold path can skip
-            # entirely (a defaulted cosine on a euclidean container would fold and
-            # overwrite unrelated memories).
-            self._distance_function_read_failed = True
-            logger.debug(
-                "vector dedup: could not read container vector policy; defaulting to cosine (not cached)",
-                exc_info=True,
-            )
-            return "cosine"
-        fn = distance_function_from_container_properties(props)
-        self._distance_function_cache = fn
-        self._distance_function_read_failed = False
-        return fn
-
-    def _warn_euclidean_autodrop_once(self, distance_function: str) -> None:
-        """One-shot WARN that the near-exact vector auto-drop is disabled.
-
-        The near-exact threshold is cosine-calibrated; on euclidean
-        the destructive auto-drop is skipped and LLM reconcile still runs.
-        Logged once per pipeline instance to avoid hot-path spam.
-        """
-        if getattr(self, "_warned_euclidean_autodrop", False):
-            return
-        self._warned_euclidean_autodrop = True
-        logger.warning(
-            "Container distanceFunction=%r: near-exact vector auto-drop is "
-            "cosine-calibrated and has been DISABLED for this distance function. "
-            "Duplicate detection falls back to borderline tagging + LLM reconcile. "
-            "Use cosine/dotproduct embeddings for vector-floor auto-dedup.",
-            distance_function,
-        )
-
-    def _warn_distance_policy_unavailable_once(self) -> None:
-        """One-shot WARN that in-place folding was skipped (policy unreadable)."""
-        if getattr(self, "_warned_distance_policy_unavailable", False):
-            return
-        self._warned_distance_policy_unavailable = True
-        logger.warning(
-            "vector dedup: container vector policy could not be read; skipping "
-            "near-exact auto-drop this run to avoid mis-calibrated drops. Memories are "
-            "written as-is and reconciled on a later run once the policy is readable."
-        )
-
-    def _vector_candidates(
-        self,
-        *,
-        user_id: str,
-        embedding: list[float],
-        memory_type: str,
-        top_k: int,
-        exclude_ids: set[str],
-    ) -> list[dict[str, Any]]:
-        """Return nearest active same-type memories using Cosmos VectorDistance."""
-        if not user_id or not embedding or top_k < 1:
-            return []
-        capped_top_k = top_literal(top_k, name="_vector_candidates.top_k")
-        distance_function = self._vector_distance_function()
-        order_direction = vector_order_direction(distance_function)
-        field = "embedding"
-        query = (
-            f"SELECT TOP {capped_top_k} c.id, c.content, c.type, "
-            f"VectorDistance(c.{field}, @vec) AS score "
-            "FROM c WHERE c.user_id = @user_id "
-            "AND c.type = @memory_type "
-            f"AND {_ACTIVE_DOC_FILTER} "
-            f"AND IS_DEFINED(c.{field}) "
-            # Cosmos orders ORDER BY VectorDistance() most-similar-first per the
-            # container's distanceFunction; an explicit ASC/DESC is rejected (BadRequest).
-            f"ORDER BY VectorDistance(c.{field}, @vec)"
-        )
-        rows = list(
-            self._memories_container.query_items(
-                query=query,
-                parameters=[
-                    {"name": "@user_id", "value": user_id},
-                    {"name": "@memory_type", "value": memory_type},
-                    {"name": "@vec", "value": embedding},
-                ],
-                enable_cross_partition_query=True,
-            )
-        )
-        excluded = set(exclude_ids or set())
-        candidates = [
-            {
-                "id": row.get("id"),
-                "content": row.get("content"),
-                "type": row.get("type"),
-                "score": float(row.get("score") or 0.0),
-            }
-            for row in rows
-            if row.get("id") and row.get("id") not in excluded
-        ]
-        # Most-similar-first: descending score for cosine/dotproduct, ascending for euclidean.
-        candidates.sort(
-            key=lambda row: row.get("score", 0.0),
-            reverse=order_direction == "DESC",
-        )
-        return candidates
 
     def _query_active_memories(
         self,
@@ -1707,7 +1587,7 @@ class PipelineService:
             user_doc.pop("embedding", None)
             return user_doc
         if not existing_summary and not items:
-            raise ValidationError(f"No memories found for user_id={user_id!r}")
+            raise NoSourceMemoriesError(f"No memories found for user_id={user_id!r}")
 
         items.sort(key=lambda m: m.get("created_at", ""), reverse=True)
         if recent_k is not None:
