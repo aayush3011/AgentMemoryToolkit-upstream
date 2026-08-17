@@ -341,9 +341,6 @@ def _resolve_vector_index_type(val: Optional[str]) -> str:
     return raw
 
 
-_SIMILARITY_DESCENDING_FUNCTIONS = frozenset({"cosine", "dotproduct"})
-
-
 def cosine_similarity(a: list[float], b: list[float]) -> float:
     """Cosine similarity of two equal-length vectors.
 
@@ -384,35 +381,6 @@ def vector_centroid(vectors: list[list[float]]) -> list[float]:
     if count == 0:
         return []
     return [value / count for value in acc]
-
-
-def vector_order_direction(distance_function: str) -> str:
-    """Return the ``ORDER BY VectorDistance(...)`` direction for most-similar-first.
-
-    ``DESC`` for cosine/dotproduct (higher score = more similar), ``ASC`` for
-    euclidean (lower distance = more similar).
-    """
-    return "DESC" if distance_function in _SIMILARITY_DESCENDING_FUNCTIONS else "ASC"
-
-
-def distance_function_from_container_properties(props: Any, *, default: str = "cosine") -> str:
-    """Read the vector embedding's ``distanceFunction`` from container properties.
-
-    The distance function (cosine/dotproduct/euclidean) is chosen at
-    ``create_memory_store`` time, written immutably into the container's vector
-    embedding policy, and read back here from the authoritative source
-    (``container.read()``) so the dedup vector-floor logic matches how the
-    container actually ranks. This SDK provisions exactly one vector embedding;
-    falls back to ``default`` (cosine) when the policy is absent or malformed
-    (e.g. ``__new__``-built test instances with mocked containers).
-    """
-    policy = props.get("vectorEmbeddingPolicy") if isinstance(props, dict) else None
-    embeddings = policy.get("vectorEmbeddings") if isinstance(policy, dict) else None
-    entry = embeddings[0] if isinstance(embeddings, list) and embeddings else None
-    fn = entry.get("distanceFunction") if isinstance(entry, dict) else None
-    if isinstance(fn, str) and fn in _ALLOWED_DISTANCE_FUNCTIONS:
-        return fn
-    return default
 
 
 def _resolve_full_text_language(val: Optional[str]) -> str:

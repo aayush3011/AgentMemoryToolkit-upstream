@@ -171,8 +171,7 @@ def _wait_vector_searchable(
 
     ``upsert_memory`` stores the embedding synchronously, but Cosmos's DiskANN vector
     index catches up asynchronously (~1-2s). Gating on a real vector search makes
-    the subsequent ``_vector_candidates`` lookup deterministic instead of racing
-    the index."""
+    the subsequent retrieval deterministic instead of racing the index."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:

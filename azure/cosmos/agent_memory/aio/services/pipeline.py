@@ -29,8 +29,6 @@ from azure.cosmos.agent_memory._container_routing import ContainerKey
 from azure.cosmos.agent_memory._utils import (
     DEFAULT_TTL_BY_TYPE,
     compute_content_hash,
-    distance_function_from_container_properties,
-    vector_order_direction,
 )
 from azure.cosmos.agent_memory.aio.store import AsyncMemoryStore
 from azure.cosmos.agent_memory.exceptions import (
@@ -300,118 +298,6 @@ class AsyncPipelineService:
 
     async def _embed_batch(self, texts: list[str]) -> list[list[float]]:
         return await self._embeddings.generate_batch(texts)
-
-    async def _vector_distance_function(self) -> str:
-        """Return the container's configured Cosmos ``distanceFunction`` (cached).
-
-        Read from the container's vector embedding policy (``await container.read()``)
-        - the authoritative, immutable source set when the container was created.
-        Drives the ORDER BY direction and similarity-threshold comparisons so dedup
-        never silently assumes cosine. Falls back to cosine when the policy can't be
-        read (e.g. ``__new__``-built test instances with mocked containers).
-        """
-        fn = getattr(self, "_distance_function_cache", None)
-        if fn is not None:
-            return fn
-        try:
-            props = await self._memories_container.read()
-        except Exception:
-            # See sync pipeline: don't cache a defaulted cosine, and flag the
-            # failure so the destructive in-place fold path skips this run rather
-            # than mis-applying cosine bands to (possibly euclidean) distances.
-            self._distance_function_read_failed = True
-            logger.debug(
-                "vector dedup: could not read container vector policy; defaulting to cosine (not cached)",
-                exc_info=True,
-            )
-            return "cosine"
-        fn = distance_function_from_container_properties(props)
-        self._distance_function_cache = fn
-        self._distance_function_read_failed = False
-        return fn
-
-    def _warn_distance_policy_unavailable_once(self) -> None:
-        """One-shot WARN that in-place folding was skipped (policy unreadable)."""
-        if getattr(self, "_warned_distance_policy_unavailable", False):
-            return
-        self._warned_distance_policy_unavailable = True
-        logger.warning(
-            "vector dedup: container vector policy could not be read; skipping "
-            "near-exact auto-drop this run to avoid mis-calibrated drops. Memories are "
-            "written as-is and reconciled on a later run once the policy is readable."
-        )
-
-    def _warn_euclidean_autodrop_once(self, distance_function: str) -> None:
-        """One-shot WARN that the near-exact vector auto-drop is disabled.
-
-        The near-exact threshold is cosine-calibrated; on euclidean
-        the destructive auto-drop is skipped and LLM reconcile still runs.
-        Logged once per pipeline instance to avoid hot-path spam.
-        """
-        if getattr(self, "_warned_euclidean_autodrop", False):
-            return
-        self._warned_euclidean_autodrop = True
-        logger.warning(
-            "Container distanceFunction=%r: near-exact vector auto-drop is "
-            "cosine-calibrated and has been DISABLED for this distance function. "
-            "Duplicate detection falls back to borderline tagging + LLM reconcile. "
-            "Use cosine/dotproduct embeddings for vector-floor auto-dedup.",
-            distance_function,
-        )
-
-    async def _vector_candidates(
-        self,
-        *,
-        user_id: str,
-        embedding,
-        memory_type,
-        top_k,
-        exclude_ids,
-    ) -> list[dict]:
-        """Return active same-user vector candidates from Cosmos."""
-        if not user_id or not embedding or not top_k or int(top_k) < 1:
-            return []
-        excluded = set(exclude_ids or [])
-        capped_top = top_literal(int(top_k), name="_vector_candidates.top_k")
-        distance_function = await self._vector_distance_function()
-        order_direction = vector_order_direction(distance_function)
-        field = "embedding"
-        query = (
-            f"SELECT TOP {capped_top} c.id, c.content, c.type, "
-            f"VectorDistance(c.{field}, @vec) AS score "
-            "FROM c WHERE c.user_id = @user_id "
-            "AND c.type = @memory_type "
-            f"AND {_ACTIVE_DOC_FILTER} "
-            f"AND IS_DEFINED(c.{field}) "
-            # Cosmos orders ORDER BY VectorDistance() most-similar-first per the
-            # container's distanceFunction; an explicit ASC/DESC is rejected (BadRequest).
-            f"ORDER BY VectorDistance(c.{field}, @vec)"
-        )
-        rows = await self._query_items(
-            self._memories_container,
-            query=query,
-            parameters=[
-                {"name": "@user_id", "value": user_id},
-                {"name": "@memory_type", "value": memory_type},
-                {"name": "@vec", "value": embedding},
-            ],
-        )
-        candidates = [
-            {
-                "id": row.get("id"),
-                "content": row.get("content"),
-                "type": row.get("type"),
-                "score": float(row.get("score") or 0.0),
-            }
-            for row in rows
-            if row.get("id") and row.get("id") not in excluded
-        ]
-        # Most-similar-first: descending score for cosine/dotproduct, ascending for euclidean.
-        candidates.sort(
-            key=lambda item: item.get("score", 0.0),
-            reverse=order_direction == "DESC",
-        )
-        return candidates
 
     def _prompt_lineage(self, filename: str) -> dict[str, str]:
         """Return ``{prompt_id, prompt_version}`` for stamping a doc.

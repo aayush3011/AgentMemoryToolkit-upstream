@@ -156,8 +156,8 @@ async def _async_wait_vector_searchable(
     timeout: float = 20.0,
 ) -> None:
     """Poll vector search until the user's seeded fact is retrievable (DiskANN
-    index caught up), so the subsequent ``_vector_candidates`` lookup is
-    deterministic rather than racing the async index."""
+    index caught up), so the subsequent retrieval is deterministic rather than
+    racing the async index."""
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:

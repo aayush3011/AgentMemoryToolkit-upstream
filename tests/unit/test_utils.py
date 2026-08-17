@@ -15,10 +15,8 @@ from azure.cosmos.agent_memory._utils import (
     _resolve_vector_index_type,
     build_cosmos_user_agent,
     compute_content_hash,
-    distance_function_from_container_properties,
     extract_keywords,
     normalize_ai_foundry_endpoint,
-    vector_order_direction,
 )
 from azure.cosmos.agent_memory.exceptions import ConfigurationError, ValidationError
 
@@ -224,54 +222,6 @@ def test_resolve_distance_function_explicit():
 def test_resolve_distance_function_invalid_raises():
     with pytest.raises(ConfigurationError):
         _resolve_distance_function("manhattan")
-
-
-def test_vector_order_direction_per_function():
-    # cosine/dotproduct: higher VectorDistance == more similar -> DESC for nearest-first.
-    assert vector_order_direction("cosine") == "DESC"
-    assert vector_order_direction("dotproduct") == "DESC"
-    # euclidean: lower distance == more similar -> ASC for nearest-first.
-    assert vector_order_direction("euclidean") == "ASC"
-
-
-def test_distance_function_from_container_properties_reads_policy():
-    props = {
-        "id": "memories",
-        "vectorEmbeddingPolicy": {
-            "vectorEmbeddings": [
-                {"path": "/embedding", "dataType": "float32", "distanceFunction": "euclidean", "dimensions": 1536}
-            ]
-        },
-    }
-    assert distance_function_from_container_properties(props) == "euclidean"
-
-
-def test_distance_function_from_container_properties_reads_single_embedding():
-    # This SDK provisions a single vector embedding; the resolver reads its
-    # distanceFunction directly (the path value is irrelevant here).
-    props = {
-        "vectorEmbeddingPolicy": {
-            "vectorEmbeddings": [
-                {"path": "/embedding", "distanceFunction": "dotproduct"},
-            ]
-        }
-    }
-    assert distance_function_from_container_properties(props) == "dotproduct"
-
-
-@pytest.mark.parametrize(
-    "props",
-    [
-        None,
-        {},
-        {"vectorEmbeddingPolicy": {}},
-        {"vectorEmbeddingPolicy": {"vectorEmbeddings": []}},
-        {"vectorEmbeddingPolicy": {"vectorEmbeddings": [{"path": "/embedding", "distanceFunction": "manhattan"}]}},
-        "not-a-dict",
-    ],
-)
-def test_distance_function_from_container_properties_falls_back_to_cosine(props):
-    assert distance_function_from_container_properties(props) == "cosine"
 
 
 def test_extract_keywords_basic_and_stopwords():
