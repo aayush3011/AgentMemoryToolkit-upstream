@@ -81,6 +81,14 @@ from azure.cosmos.agent_memory.thresholds import (  # noqa: E402
 
 DEFAULT_MAX_BATCH_SIZE = 20
 
+# UserSummaryOrchestrator can cross the user-summary threshold before fact
+# extraction has persisted anything for a brand-new user, because the change
+# feed starts the extract and user-summary orchestrations independently. These
+# bound a replay-safe Durable wait so the summary is still produced once
+# extraction lands, instead of failing after the short activity-retry window.
+DEFAULT_USER_SUMMARY_WAIT_SECONDS = 120
+DEFAULT_USER_SUMMARY_WAIT_INTERVAL_SECONDS = 10
+
 
 def _parse_threshold(name: str, default: int) -> int:
     """Parse an integer threshold env var.
@@ -170,6 +178,22 @@ def _parse_threshold_float(name: str, default: float) -> float:
 
 def get_max_batch_size() -> int:
     return _parse_int("MAX_BATCH_SIZE", DEFAULT_MAX_BATCH_SIZE)
+
+
+def get_user_summary_wait_seconds() -> int:
+    """Total seconds ``UserSummaryOrchestrator`` waits for extraction to persist
+    the first memories before giving up for this cadence. ``0`` disables waiting
+    (a single attempt)."""
+    return _parse_threshold("USER_SUMMARY_WAIT_SECONDS", DEFAULT_USER_SUMMARY_WAIT_SECONDS)
+
+
+def get_user_summary_wait_interval_seconds() -> int:
+    """Seconds between ``UserSummaryOrchestrator`` readiness polls, floored at 1
+    so a misconfigured ``0`` cannot busy-loop."""
+    return max(
+        1,
+        _parse_threshold("USER_SUMMARY_WAIT_INTERVAL_SECONDS", DEFAULT_USER_SUMMARY_WAIT_INTERVAL_SECONDS),
+    )
 
 
 def get_thread_summary_every_n() -> int:

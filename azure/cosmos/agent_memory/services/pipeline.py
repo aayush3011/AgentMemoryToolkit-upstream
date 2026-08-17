@@ -30,6 +30,7 @@ from azure.cosmos.agent_memory._utils import (
     compute_content_hash,
 )
 from azure.cosmos.agent_memory.exceptions import (
+    NoSourceMemoriesError,
     ValidationError,
 )
 from azure.cosmos.agent_memory.logging import get_logger
@@ -1586,7 +1587,7 @@ class PipelineService:
             user_doc.pop("embedding", None)
             return user_doc
         if not existing_summary and not items:
-            raise ValidationError(f"No memories found for user_id={user_id!r}")
+            raise NoSourceMemoriesError(f"No memories found for user_id={user_id!r}")
 
         items.sort(key=lambda m: m.get("created_at", ""), reverse=True)
         if recent_k is not None:

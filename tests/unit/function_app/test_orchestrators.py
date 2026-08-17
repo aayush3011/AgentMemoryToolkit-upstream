@@ -9,12 +9,15 @@ LLM is required.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from orchestrators import extract_memories as em_mod
 from orchestrators import thread_summary as ts_mod
 from orchestrators import user_summary as us_mod
+
+from azure.cosmos.agent_memory.exceptions import NoSourceMemoriesError
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -75,6 +78,41 @@ def _drive(gen, activity_results):
             sent = next(iterator)
     except StopIteration as stop:
         return stop.value, yields
+
+
+class _TimerContext:
+    """DurableOrchestrationContext double for the user-summary wait/poll loop.
+
+    Unlike the ``MagicMock``-based :func:`_make_context`, this exposes a real
+    ``current_utc_datetime`` that advances by ``step_seconds`` on every read
+    (so the wait budget can elapse deterministically) and records
+    ``create_timer`` calls. Activity calls yield the same ``("__call__", ...)``
+    sentinel that :func:`_drive` feeds pre-canned results into.
+    """
+
+    def __init__(self, payload, *, start=None, step_seconds=0):
+        self._payload = payload
+        self._now = start or datetime(2026, 1, 1, tzinfo=timezone.utc)
+        self._step = timedelta(seconds=step_seconds)
+        self.activity_calls: list[tuple] = []
+        self.timer_fire_times: list = []
+
+    def get_input(self):
+        return self._payload
+
+    @property
+    def current_utc_datetime(self):
+        now = self._now
+        self._now = now + self._step
+        return now
+
+    def call_activity_with_retry(self, name, retry, activity_payload):
+        self.activity_calls.append((name, activity_payload))
+        return ("__call__", name, activity_payload)
+
+    def create_timer(self, fire_at):
+        self.timer_fire_times.append(fire_at)
+        return ("__timer__", fire_at)
 
 
 # ---------------------------------------------------------------------------
@@ -500,3 +538,86 @@ class TestUserSummaryOrchestrator:
             gen = self._orchestrator()(ctx)
             with pytest.raises(KeyError):
                 next(gen)
+
+
+class TestUserSummaryWaitForExtraction:
+    """A brand-new user can cross the user-summary threshold before extraction
+    has persisted anything (the change feed starts the two orchestrations
+    independently). The orchestrator must wait on a replay-safe Durable timer
+    and still produce the summary, instead of failing after the short
+    activity-retry window."""
+
+    def _orchestrator(self):
+        return _user_function(us_mod.UserSummaryOrchestrator)
+
+    @patch.object(us_mod, "default_retry_options", return_value=MagicMock())
+    def test_waits_then_persists_when_memories_arrive_late(self, _retry, monkeypatch):
+        monkeypatch.setenv("USER_SUMMARY_WAIT_SECONDS", "120")
+        monkeypatch.setenv("USER_SUMMARY_WAIT_INTERVAL_SECONDS", "10")
+        # Static clock: the budget never elapses, so the loop ends only when
+        # memories finally land.
+        ctx = _TimerContext({"user_id": "u1"}, step_seconds=0)
+        gen = self._orchestrator()(ctx)
+        result, _ = _drive(
+            gen,
+            [
+                {"status": "no_memories_yet"},  # us_Extract #1 - extraction not done
+                None,  # create_timer #1
+                {"status": "no_memories_yet"},  # us_Extract #2 - still not done
+                None,  # create_timer #2
+                {"id": "user-sum-1"},  # us_Extract #3 - memories landed
+                {"id": "user-sum-1"},  # us_PersistUserSummary
+            ],
+        )
+        assert result == {"persisted": True, "user_summary_id": "user-sum-1"}
+        assert len(ctx.timer_fire_times) == 2  # waited twice before succeeding
+        assert [name for name, _ in ctx.activity_calls] == [
+            "us_Extract",
+            "us_Extract",
+            "us_Extract",
+            "us_PersistUserSummary",
+        ]
+
+    @patch.object(us_mod, "default_retry_options", return_value=MagicMock())
+    def test_gives_up_after_budget_without_persisting(self, _retry, monkeypatch):
+        monkeypatch.setenv("USER_SUMMARY_WAIT_SECONDS", "15")
+        monkeypatch.setenv("USER_SUMMARY_WAIT_INTERVAL_SECONDS", "10")
+        # Clock advances 10s per read, so the 15s budget elapses after one wait.
+        ctx = _TimerContext({"user_id": "u1"}, step_seconds=10)
+        gen = self._orchestrator()(ctx)
+        result, _ = _drive(
+            gen,
+            [
+                {"status": "no_memories_yet"},  # us_Extract #1
+                None,  # create_timer #1
+                {"status": "no_memories_yet"},  # us_Extract #2 - budget now exceeded
+            ],
+        )
+        assert result == {"persisted": False, "user_summary_id": None, "skipped": "no_memories_yet"}
+        assert "us_PersistUserSummary" not in [name for name, _ in ctx.activity_calls]
+
+    @patch.object(us_mod, "default_retry_options", return_value=MagicMock())
+    def test_persists_immediately_when_memories_already_present(self, _retry, monkeypatch):
+        monkeypatch.setenv("USER_SUMMARY_WAIT_SECONDS", "120")
+        ctx = _TimerContext({"user_id": "u1"}, step_seconds=0)
+        gen = self._orchestrator()(ctx)
+        result, _ = _drive(gen, [{"id": "us"}, {"id": "us"}])
+        assert result == {"persisted": True, "user_summary_id": "us"}
+        assert ctx.timer_fire_times == []  # no waiting when memories already exist
+
+
+class TestUserSummaryExtractActivity:
+    def test_returns_sentinel_when_no_source_memories(self):
+        pipeline = MagicMock()
+        pipeline.generate_user_summary_durable.side_effect = NoSourceMemoriesError("No memories found for user_id='u1'")
+        with patch.object(us_mod, "get_pipeline", return_value=pipeline):
+            result = us_mod.us_Extract({"user_id": "u1", "limit": 20, "thread_ids": None})
+        assert result == {"status": "no_memories_yet"}
+
+    def test_passes_through_summary_doc_when_memories_present(self):
+        pipeline = MagicMock()
+        pipeline.generate_user_summary_durable.return_value = {"id": "user_summary_u1", "type": "user_summary"}
+        with patch.object(us_mod, "get_pipeline", return_value=pipeline):
+            result = us_mod.us_Extract({"user_id": "u1", "limit": 20, "thread_ids": ["t1"]})
+        assert result == {"id": "user_summary_u1", "type": "user_summary"}
+        pipeline.generate_user_summary_durable.assert_called_once_with(user_id="u1", recent_k=20, thread_ids=["t1"])

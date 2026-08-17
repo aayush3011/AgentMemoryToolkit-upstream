@@ -25,12 +25,17 @@ jobs:
     permissions:
       contents: read
 
+  smoke:
+    uses: ./.github/workflows/_smoke.yml
+    permissions:
+      contents: read
+
   ci-success:
     # Single required-status-check target. Branch protection should require
     # only this job; it summarizes lint + test matrix results so a failure
     # in any matrix cell blocks merge.
     name: "CI Success"
-    needs: [lint, test]
+    needs: [lint, test, smoke]
     if: always()
     runs-on: ubuntu-latest
     env:
