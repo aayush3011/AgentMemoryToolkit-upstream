@@ -1,6 +1,6 @@
 ## Release History
 
-## [0.3.0b2] (Unreleased)
+## [0.3.0b2] (2026-08-17)
 
 #### Features Added
 * Episodic memory is now a first-class memory type. Bounded experiences are segmented from the turn stream at idle-gap, topic-drift, and max-size boundaries, each captured as an `EpisodicRecord` with a summary, timeline events, an optional outcome, and first-class `lessons`. See [PR:#37](https://github.com/AzureCosmosDB/AgentMemoryToolkit/pull/37)
