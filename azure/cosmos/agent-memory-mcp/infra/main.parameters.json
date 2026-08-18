@@ -1,0 +1,57 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "environmentName": {
+      "value": "${AZURE_ENV_NAME}"
+    },
+    "location": {
+      "value": "${AZURE_LOCATION=eastus2}"
+    },
+    "containerImage": {
+      "value": "${AGENT_MEMORY_MCP_IMAGE}"
+    },
+    "cosmosAccountName": {
+      "value": "${COSMOS_DB_ACCOUNT_NAME}"
+    },
+    "cosmosDatabaseName": {
+      "value": "${COSMOS_DB_DATABASE=ai_memory}"
+    },
+    "memoriesContainerName": {
+      "value": "${COSMOS_DB_MEMORIES_CONTAINER=memories}"
+    },
+    "turnsContainerName": {
+      "value": "${COSMOS_DB_TURNS_CONTAINER=memories_turns}"
+    },
+    "summariesContainerName": {
+      "value": "${COSMOS_DB_SUMMARIES_CONTAINER=memories_summaries}"
+    },
+    "countersContainerName": {
+      "value": "${COSMOS_DB_COUNTERS_CONTAINER=counter}"
+    },
+    "leaseContainerName": {
+      "value": "${COSMOS_DB_LEASE_CONTAINER=leases}"
+    },
+    "aiFoundryEndpoint": {
+      "value": "${AI_FOUNDRY_ENDPOINT=}"
+    },
+    "embeddingDeploymentName": {
+      "value": "${AI_FOUNDRY_EMBEDDING_DEPLOYMENT_NAME=text-embedding-3-large}"
+    },
+    "embeddingDimensions": {
+      "value": "${AI_FOUNDRY_EMBEDDING_DIMENSIONS=}"
+    },
+    "chatDeploymentName": {
+      "value": "${AI_FOUNDRY_CHAT_DEPLOYMENT_NAME=gpt-4o-mini}"
+    },
+    "entraAudience": {
+      "value": "${ENTRA_AUDIENCE}"
+    },
+    "resourceServerUrl": {
+      "value": "${AGENT_MEMORY_RESOURCE_SERVER_URL=}"
+    },
+    "requiredScopes": {
+      "value": "${AGENT_MEMORY_REQUIRED_SCOPES=}"
+    }
+  }
+}
