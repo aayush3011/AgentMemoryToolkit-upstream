@@ -194,7 +194,7 @@ wheels = [
 
 [[package]]
 name = "azure-cosmos-agent-memory"
-version = "0.3.0b1"
+version = "0.3.0b2"
 source = { editable = "." }
 dependencies = [
     { name = "aiohttp" },
@@ -210,6 +210,7 @@ dependencies = [
 
 [package.optional-dependencies]
 dev = [
+    { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -223,6 +224,7 @@ requires-dist = [
     { name = "aiohttp", specifier = ">=3.10" },
     { name = "azure-cosmos", specifier = ">=4.16.0" },
     { name = "azure-identity", specifier = ">=1.20" },
+    { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.27" },
     { name = "jinja2", specifier = ">=3.1.4" },
     { name = "openai", specifier = ">=1.60" },
     { name = "prompty", specifier = ">=2.0.0a9" },
