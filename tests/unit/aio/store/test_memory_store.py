@@ -145,8 +145,8 @@ async def test_query_wraps_query_items():
     store = AsyncMemoryStore(containers=_containers(memories=memories))
 
     results = await store.query(
-        "SELECT * FROM c WHERE c.user_id = @user_id",
-        [{"name": "@user_id", "value": "u1"}],
+        "SELECT * FROM c WHERE c.scope_key = @scope_key",
+        [{"name": "@scope_key", "value": "user:u1"}],
         container_key=ContainerKey.MEMORIES,
     )
 
@@ -164,7 +164,7 @@ async def test_update_replaces_matching_doc():
 
     await store.update("m1", user_id="u1", thread_id="t1", memory_type="fact", content="updated")
 
-    memories.read_item.assert_awaited_once_with(item="m1", partition_key=["u1", "t1"])
+    memories.read_item.assert_awaited_once_with(item="m1", partition_key=["default", "user:u1", "t1"])
     body = memories.replace_item.call_args.kwargs["body"]
     assert body["content"] == "updated"
     assert body["type"] == "fact"
@@ -202,7 +202,7 @@ async def test_delete_calls_delete_item_directly():
 
     await store.delete("m1", user_id="u1", thread_id="t1", memory_type="fact")
 
-    memories.delete_item.assert_awaited_once_with(item="m1", partition_key=["u1", "t1"])
+    memories.delete_item.assert_awaited_once_with(item="m1", partition_key=["default", "user:u1", "t1"])
 
 
 async def test_delete_raises_when_missing():
@@ -237,11 +237,13 @@ async def test_read_and_tag_mutation_use_point_reads():
     memories.replace_item = AsyncMock()
     store = AsyncMemoryStore(containers=_containers(memories=memories))
 
-    assert (await store.read_item("m1", ["u1", "t1"], container_key=ContainerKey.MEMORIES))["id"] == "m1"
+    assert (await store.read_item("m1", ["default", "user:u1", "t1"], container_key=ContainerKey.MEMORIES))[
+        "id"
+    ] == "m1"
     await store.add_tags("m1", "u1", "t1", "fact", ["New"])
     await store.remove_tags("m1", "u1", "t1", "fact", ["old"])
 
-    assert memories.read_item.call_args_list[0].kwargs == {"item": "m1", "partition_key": ["u1", "t1"]}
+    assert memories.read_item.call_args_list[0].kwargs == {"item": "m1", "partition_key": ["default", "user:u1", "t1"]}
     assert memories.replace_item.await_count == 2
 
 
@@ -395,12 +397,12 @@ async def test_get_thread_summary_queries_summaries_with_partition_key():
 
     assert [doc["id"] for doc in results] == ["s1"]
     call_kwargs = summaries.query_items.call_args.kwargs
-    assert call_kwargs["partition_key"] == ["u1", "t1"]
+    assert call_kwargs["partition_key"] == ["default", "user:u1", "t1"]
     assert "c.type = @type" in call_kwargs["query"]
     assert "TOP @recent_k" in call_kwargs["query"]
     params = _params_by_name(call_kwargs)
     assert params["@type"] == "thread_summary"
-    assert params["@user_id"] == "u1"
+    assert params["@scope_key"] == "user:u1"
     assert params["@thread_id"] == "t1"
 
 
@@ -494,7 +496,7 @@ async def test_search_fact_only_with_thread_id_uses_partition_path():
     )
 
     call_kwargs = memories.query_items.call_args.kwargs
-    assert call_kwargs.get("partition_key") == ["u1", "t1"]
+    assert call_kwargs.get("partition_key") == ["default", "user:u1", "t1"]
 
 
 async def test_add_turn_skips_embedding_by_default():
@@ -581,7 +583,7 @@ async def test_search_turns_scopes_to_single_partition_with_thread_id():
     await store.search_turns(search_terms="hello", user_id="u1", thread_id="t1")
 
     kwargs = turns.query_items.call_args.kwargs
-    assert kwargs["partition_key"] == ["u1", "t1"]
+    assert kwargs["partition_key"] == ["default", "user:u1", "t1"]
 
 
 async def test_search_turns_fans_out_across_partitions_without_thread_id():
