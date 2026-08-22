@@ -1210,3 +1210,40 @@ async def test_reconcile_rejects_tenant_override():
         await client.reconcile("alice", scope_key="org:victim", tenant_id="victim", ctx=ctx)
 
     client._get_pipeline.assert_not_called()
+
+
+async def test_bound_add_local_refuses_unauthorized_write_scope_async():
+    from azure.cosmos.agent_memory._security import SecurityContext
+    from azure.cosmos.agent_memory.exceptions import ValidationError
+
+    client = _make_client()
+    mallory = SecurityContext(tenant_id="acme", principal="user:mallory")
+    bound = client.session(mallory, write_scope="team:secret")
+
+    with pytest.raises(ValidationError, match="write permission denied"):
+        bound.add_local(role="user", content="exfiltrate", memory_type="fact")
+    assert client.local_memory == []
+
+
+async def test_bound_add_local_agent_scope_is_readable_by_the_agent_async():
+    from azure.cosmos.agent_memory._authz import can
+    from azure.cosmos.agent_memory._security import SecurityContext
+
+    client = _make_client()
+    ctx = SecurityContext(tenant_id="acme", principal="agent:svc", agent_id="agent:svc")
+    bound = client.session(ctx)
+
+    bound.add_local(role="agent", content="operational note", memory_type="fact")
+    record = client.local_memory[-1]
+    assert record["scope_key"] == "agent:svc"
+    assert record["acl"]["read"] == ["agent:svc"]
+    assert can(ctx, record["acl"])
+
+
+async def test_bound_session_supports_agent_principal_async():
+    from azure.cosmos.agent_memory._security import SecurityContext
+
+    client = _make_client()
+    bound = client.session(SecurityContext(tenant_id="acme", principal="agent:svc"))
+    assert bound.write_scope == "agent:svc"
+    assert bound.user_id == "svc"

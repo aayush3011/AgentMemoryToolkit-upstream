@@ -387,18 +387,24 @@ class TestUserAgent:
 class TestValidateTopology:
     def test_validate_topology_succeeds_on_healthy_deploy(self):
         mem = _make_client()
+        healthy = {"partitionKey": {"paths": ["/tenant_id", "/scope_key", "/thread_id"]}}
         memories = MagicMock(id="memories")
         turns = MagicMock(id="memories_turns")
         summaries = MagicMock(id="memories_summaries")
+        counter = MagicMock(id="counter")
+        for c in (memories, turns, summaries, counter):
+            c.read.return_value = healthy
         mem._memories_container_client = memories
         mem._turns_container_client = turns
         mem._summaries_container_client = summaries
+        mem._counter_container_client = counter
 
         mem.validate_topology()
 
         memories.read.assert_called_once()
         turns.read.assert_called_once()
         summaries.read.assert_called_once()
+        counter.read.assert_called_once()
 
     def test_validate_topology_raises_on_partition_key_mismatch(self):
         mem = _make_client()
@@ -408,6 +414,35 @@ class TestValidateTopology:
             getattr(mem, attr).read.return_value = stale_pk
 
         with pytest.raises(RuntimeError, match="partition key"):
+            mem.validate_topology()
+
+    def test_validate_topology_raises_on_empty_partition_key(self):
+        mem = _make_client()
+        good = {"partitionKey": {"paths": ["/tenant_id", "/scope_key", "/thread_id"]}}
+        mem._memories_container_client = MagicMock(id="memories")
+        mem._turns_container_client = MagicMock(id="memories_turns")
+        mem._summaries_container_client = MagicMock(id="memories_summaries")
+        mem._memories_container_client.read.return_value = good
+        mem._turns_container_client.read.return_value = good
+        # A container whose metadata carries no partition-key paths must be rejected,
+        # not silently accepted.
+        mem._summaries_container_client.read.return_value = {"partitionKey": {"paths": []}}
+
+        with pytest.raises(RuntimeError, match="partition key"):
+            mem.validate_topology()
+
+    def test_validate_topology_checks_counter_container_partition_key(self):
+        mem = _make_client()
+        good = {"partitionKey": {"paths": ["/tenant_id", "/scope_key", "/thread_id"]}}
+        for attr in ("_memories_container_client", "_turns_container_client", "_summaries_container_client"):
+            setattr(mem, attr, MagicMock(id=attr))
+            getattr(mem, attr).read.return_value = good
+        # The counter container is validated too, and its wrong (2-level) key is caught.
+        counter = MagicMock(id="counter")
+        counter.read.return_value = {"partitionKey": {"paths": ["/user_id", "/thread_id"]}}
+        mem._counter_container_client = counter
+
+        with pytest.raises(RuntimeError, match="counter"):
             mem.validate_topology()
 
     def test_validate_topology_raises_on_missing_container(self):

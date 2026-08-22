@@ -124,10 +124,17 @@ class _BoundAsyncCosmosMemoryClient:
         authorize_scope_write(self.ctx, self.write_scope, self.user_id)
         self._client.add_local(*args, **kwargs)
         if self._client.local_memory:
-            ensure_scope_fields(self._client.local_memory[-1], tenant_id=self.ctx.tenant_id, scope_key=self.write_scope)
+            record = self._client.local_memory[-1]
+            record.pop("acl", None)
+            ensure_scope_fields(
+                record,
+                tenant_id=self.ctx.tenant_id,
+                scope_key=self.write_scope,
+                principal=self.ctx.principal,
+                agent_id=self.ctx.agent_id,
+            )
             if self.ctx.agent_id:
-                provenance = self._client.local_memory[-1].setdefault("provenance", {})
-                provenance.setdefault("agent_id", self.ctx.agent_id)
+                record.setdefault("provenance", {}).setdefault("agent_id", self.ctx.agent_id)
 
     async def search_cosmos(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         kwargs.setdefault("tenant_id", self.ctx.tenant_id)

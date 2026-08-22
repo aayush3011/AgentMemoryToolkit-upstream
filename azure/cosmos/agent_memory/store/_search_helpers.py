@@ -88,7 +88,9 @@ def normalize_scope_keys(scopes: Optional[list[str]]) -> list[str] | None:
     back to the single-user read path.
     """
     if scopes is not None:
-        return list(dict.fromkeys(str(scope).strip() for scope in scopes if str(scope).strip()))
+        return list(
+            dict.fromkeys(str(scope).strip() for scope in scopes if scope is not None and str(scope).strip())
+        )
     return None
 
 

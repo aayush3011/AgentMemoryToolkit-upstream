@@ -95,6 +95,25 @@ def test_promote_refuses_reading_an_unauthorized_source_scope():
 
     memories.query_items.assert_not_called()
     memories.upsert_item.assert_not_called()
+def test_promote_refuses_cross_tenant_source_document():
+    """Even with target write + source read authorized, a source doc whose tenant differs
+    from the caller must be refused - the real cross-tenant guard, now that the dead
+    target-scope tenant check is removed."""
+    # Source read is authorized (admin), the query returns a doc stamped with a foreign
+    # tenant_id; promote must reject it rather than copy across tenants.
+    foreign = _fact(tenant_id="other-tenant")
+    memories = MagicMock()
+    memories.query_items.return_value = [foreign]
+    store = MemoryStore(containers=_containers(memories=memories))
+    ctx = SecurityContext(tenant_id="acme", principal="user:root", roles=["tenant:admin"])
+
+    with pytest.raises(ValidationError, match="outside the caller tenant"):
+        store.promote("fact_123", "user:alice", "team:eng", ctx)
+
+    memories.upsert_item.assert_not_called()
+
+
+def test_scope_hint_is_metadata_only_and_does_not_change_placement():
     svc = PipelineService.__new__(PipelineService)
     svc._transcript_metadata_keys = None
     svc._prompt_lineage = lambda _filename: {"prompt_id": "p", "prompt_version": "v1"}  # type: ignore[method-assign]

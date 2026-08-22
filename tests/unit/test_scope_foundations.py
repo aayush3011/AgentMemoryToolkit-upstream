@@ -152,6 +152,41 @@ def test_bound_add_local_allows_own_scope_and_buffers():
     assert client.local_memory[0]["scope_key"] == "user:alice"
 
 
+def test_bound_add_local_agent_scope_is_readable_by_the_agent():
+    """A buffered write in an agent session must be readable by that agent: the record's
+    ACL is re-derived for the agent scope, not left as the user_id-derived default."""
+    from azure.cosmos.agent_memory import CosmosMemoryClient
+    from azure.cosmos.agent_memory._authz import can
+
+    client = CosmosMemoryClient(use_default_credential=False)
+    ctx = SecurityContext(tenant_id="acme", principal="agent:svc", agent_id="agent:svc")
+    bound = client.session(ctx)  # default write_scope = agent:svc
+
+    bound.add_local(role="agent", content="operational note", memory_type="fact")
+    record = client.local_memory[-1]
+    assert record["scope_key"] == "agent:svc"
+    assert record["acl"]["read"] == ["agent:svc"], "read ACL must follow the agent write scope"
+    assert can(ctx, record["acl"]), "the agent must be able to read its own buffered write"
+
+
+def test_bound_add_local_team_scope_is_readable_by_teammates():
+    """A buffered write into a team scope must be readable by other team members, not just
+    the author's private user scope."""
+    from azure.cosmos.agent_memory import CosmosMemoryClient
+    from azure.cosmos.agent_memory._authz import can
+
+    client = CosmosMemoryClient(use_default_credential=False)
+    author = SecurityContext(tenant_id="acme", principal="user:alice", roles=["team:eng:writer"])
+    bound = client.session(author, write_scope="team:eng")
+
+    bound.add_local(role="user", content="team norm", memory_type="fact")
+    record = client.local_memory[-1]
+    assert record["scope_key"] == "team:eng"
+    assert record["acl"]["read"] == ["team:eng"]
+    teammate = SecurityContext(tenant_id="acme", principal="user:carol", groups=["eng"])
+    assert can(teammate, record["acl"]), "a teammate must be able to read the team-scoped buffered write"
+
+
 def test_bound_session_supports_agent_principal():
     """App-only ``agent:`` principals may open a session (regression: the strict user-id
     helper must not be called unconditionally in the bound ctor)."""
@@ -171,6 +206,21 @@ def test_resolve_read_scopes_does_not_double_prefix_team_groups():
     assert "team:eng" in scopes
     assert "team:sales" in scopes
     assert "team:team:eng" not in scopes
+
+
+def test_normalize_scope_keys_drops_none_and_blank_entries():
+    from azure.cosmos.agent_memory.store._search_helpers import normalize_scope_keys
+
+    # A None in the list must be dropped, not coerced to the literal "None" scope key.
+    assert normalize_scope_keys(["team:eng", None, "  ", "team:eng"]) == ["team:eng"]
+    assert normalize_scope_keys(None) is None
+
+
+def test_agent_scope_key_does_not_double_prefix():
+    from azure.cosmos.agent_memory._pins import agent_scope_key
+
+    assert agent_scope_key("copilot") == "agent:copilot"
+    assert agent_scope_key("agent:copilot") == "agent:copilot"
 
 
 def test_caller_subjects_and_can_support_group_acl():

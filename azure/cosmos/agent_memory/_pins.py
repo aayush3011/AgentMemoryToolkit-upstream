@@ -21,7 +21,7 @@ def agent_scope_key(agent_id: str) -> str:
     agent = str(agent_id).strip()
     if not agent:
         raise ValidationError("agent_id cannot be empty")
-    return f"agent:{agent}"
+    return agent if agent.startswith("agent:") else f"agent:{agent}"
 
 
 def normalize_injection_mode(injection_mode: str) -> InjectionMode:

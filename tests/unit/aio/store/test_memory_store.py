@@ -88,6 +88,33 @@ async def test_add_to_foreign_scope_requires_write_authorization():
     assert turns.upsert_item.await_count == 1
 
 
+async def test_add_authorize_write_anchors_own_scope_to_ctx_principal():
+    """Own-scope is derived from ctx.principal, not the request user_id, so a caller cannot
+    land a record in another principal's private scope (async parity)."""
+    from azure.cosmos.agent_memory._security import SecurityContext
+
+    turns = MagicMock()
+    turns.upsert_item = AsyncMock()
+    store = AsyncMemoryStore(containers=_containers(turns=turns))
+    mallory = SecurityContext(tenant_id="acme", principal="user:mallory")
+
+    with pytest.raises(ValidationError, match="write permission denied"):
+        await store.add(
+            user_id="victim",
+            role="user",
+            content="x",
+            thread_id="t1",
+            tenant_id="acme",
+            scope_key="user:victim",
+            ctx=mallory,
+        )
+    with pytest.raises(ValidationError, match="write permission denied"):
+        await store.add(
+            user_id="victim", role="user", content="x", thread_id="t1", tenant_id="acme", ctx=mallory
+        )
+    turns.upsert_item.assert_not_awaited()
+
+
 async def test_add_upserts_memory_document():
     turns = MagicMock()
     turns.upsert_item = AsyncMock()
