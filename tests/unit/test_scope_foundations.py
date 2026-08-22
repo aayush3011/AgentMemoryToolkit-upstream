@@ -125,6 +125,54 @@ def test_session_auto_resolves_read_scopes_from_context():
     assert "team:eng-gid" in bound.read_scopes
 
 
+def test_bound_add_local_refuses_unauthorized_write_scope():
+    """The buffer path must be gated too: add_local into a foreign scope is refused so an
+    unauthorized record never reaches the buffer that push_to_cosmos later flushes."""
+    from azure.cosmos.agent_memory import CosmosMemoryClient
+    from azure.cosmos.agent_memory.exceptions import ValidationError
+
+    client = CosmosMemoryClient(use_default_credential=False)
+    mallory = SecurityContext(tenant_id="acme", principal="user:mallory")
+    bound = client.session(mallory, write_scope="team:secret")
+
+    with pytest.raises(ValidationError, match="write permission denied"):
+        bound.add_local(role="user", content="exfiltrate", memory_type="fact")
+    assert client.local_memory == [], "nothing may enter the shared buffer on a denied write"
+
+
+def test_bound_add_local_allows_own_scope_and_buffers():
+    from azure.cosmos.agent_memory import CosmosMemoryClient
+
+    client = CosmosMemoryClient(use_default_credential=False)
+    alice = SecurityContext(tenant_id="acme", principal="user:alice")
+    bound = client.session(alice)  # default write_scope = own user scope
+
+    bound.add_local(role="user", content="mine", memory_type="fact")
+    assert len(client.local_memory) == 1
+    assert client.local_memory[0]["scope_key"] == "user:alice"
+
+
+def test_bound_session_supports_agent_principal():
+    """App-only ``agent:`` principals may open a session (regression: the strict user-id
+    helper must not be called unconditionally in the bound ctor)."""
+    from azure.cosmos.agent_memory import CosmosMemoryClient
+
+    client = CosmosMemoryClient(use_default_credential=False)
+    bound = client.session(SecurityContext(tenant_id="acme", principal="agent:svc"))
+    assert bound.write_scope == "agent:svc"
+    assert bound.user_id == "svc"
+
+
+def test_resolve_read_scopes_does_not_double_prefix_team_groups():
+    from azure.cosmos.agent_memory._authz import resolve_read_scopes
+
+    ctx = SecurityContext(tenant_id="acme", principal="user:alice", groups=["team:eng", "sales"])
+    scopes = resolve_read_scopes(ctx)
+    assert "team:eng" in scopes
+    assert "team:sales" in scopes
+    assert "team:team:eng" not in scopes
+
+
 def test_caller_subjects_and_can_support_group_acl():
     from azure.cosmos.agent_memory._authz import caller_subjects, can
 

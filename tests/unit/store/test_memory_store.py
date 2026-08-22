@@ -832,6 +832,37 @@ def test_add_to_own_user_scope_needs_no_context():
     assert turns.upsert_item.call_count == 2
 
 
+def test_authorize_write_anchors_own_scope_to_ctx_principal():
+    """Own-scope is derived from the trusted ctx.principal, never the request user_id, so a
+    caller cannot land a record in another principal's private scope."""
+    turns = MagicMock()
+    store = MemoryStore(containers=_containers(turns=turns))
+    mallory = SecurityContext(tenant_id="acme", principal="user:mallory")
+
+    # Explicit foreign user scope with a matching request user_id must NOT be treated as own.
+    with pytest.raises(ValidationError, match="write permission denied"):
+        store.add(
+            user_id="victim",
+            role="user",
+            content="x",
+            thread_id="t1",
+            tenant_id="acme",
+            scope_key="user:victim",
+            ctx=mallory,
+        )
+    # The same bypass via an omitted scope_key (effective scope derived from user_id).
+    with pytest.raises(ValidationError, match="write permission denied"):
+        store.add(
+            user_id="victim",
+            role="user",
+            content="x",
+            thread_id="t1",
+            tenant_id="acme",
+            ctx=mallory,
+        )
+    turns.upsert_item.assert_not_called()
+
+
 def test_search_scope_union_merges_dedups_and_respects_top_k():
     memories = MagicMock()
     memories.query_items.side_effect = [

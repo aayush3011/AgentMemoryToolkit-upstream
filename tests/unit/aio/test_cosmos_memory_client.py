@@ -1194,3 +1194,19 @@ class TestAsyncSelectiveInjectionPins:
             include_superseded=False,
         )
         assert store.search.call_args.kwargs["top_k"] == 1
+
+
+async def test_reconcile_rejects_tenant_override():
+    """A caller-supplied tenant_id must never widen the async context tenant boundary."""
+    from azure.cosmos.agent_memory._security import SecurityContext
+    from azure.cosmos.agent_memory.aio.cosmos_memory_client import AsyncCosmosMemoryClient
+    from azure.cosmos.agent_memory.exceptions import ValidationError
+
+    client = AsyncCosmosMemoryClient.__new__(AsyncCosmosMemoryClient)
+    client._get_pipeline = MagicMock()
+    ctx = SecurityContext(tenant_id="tenant-a", principal="user:alice", roles=["org:victim:writer"])
+
+    with pytest.raises(ValidationError, match="tenant_id cannot override"):
+        await client.reconcile("alice", scope_key="org:victim", tenant_id="victim", ctx=ctx)
+
+    client._get_pipeline.assert_not_called()

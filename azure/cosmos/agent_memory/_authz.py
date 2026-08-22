@@ -7,7 +7,9 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from azure.cosmos.agent_memory._partitioning import scope_key_for_user
 from azure.cosmos.agent_memory._security import SecurityContext
+from azure.cosmos.agent_memory.exceptions import ValidationError
 from azure.cosmos.agent_memory.logging import get_logger
 from azure.cosmos.agent_memory.models import MemoryAcl
 
@@ -64,7 +66,9 @@ def resolve_read_scopes(
         scopes.append(project_scope)
     scopes.append(f"org:{ctx.tenant_id}")
     for group in ctx.groups:
-        scopes.append(f"team:{group}")
+        if group:
+            group_str = str(group)
+            scopes.append(group_str if group_str.startswith("team:") else f"team:{group_str}")
     deduped = _dedupe_scopes(scopes)
     if cap is not None and cap >= 0:
         return deduped[:cap]
@@ -187,6 +191,31 @@ def resolve_scope_access(
         predicate=build_acl_predicate(ctx, allowed),
         decisions=decisions,
     )
+
+
+def authorize_scope_write(ctx: SecurityContext | None, scope_key: str | None, user_id: str) -> None:
+    """Refuse a write into a non-owner placement scope without write authorization.
+
+    The gate is applied to the *effective* target scope - the explicit ``scope_key`` or,
+    when absent, the record's own ``user:<user_id>`` scope. Without a context, only the
+    caller's own user scope is writable (the pre-existing single-user trust model). With a
+    context, the resolver decides: the caller's own principal scope (``user:``/``agent:``)
+    is always allowed, and any other scope requires a member/writer role or admin. Own-scope
+    is derived from the trusted ``ctx.principal``, never from the caller-supplied
+    ``user_id``, so a request cannot claim another principal's private scope. Shared by the
+    store write path and the bound-session buffer path so both enforce one contract.
+    """
+    effective_scope = scope_key or scope_key_for_user(user_id)
+    if ctx is None:
+        if effective_scope != scope_key_for_user(user_id):
+            raise ValidationError(
+                f"writing to scope {effective_scope!r} requires a SecurityContext with write permission"
+            )
+        return
+    if effective_scope not in resolve_scope_access(ctx, [effective_scope], "write").allowed_scopes:
+        raise ValidationError(
+            f"write permission denied for scope_key={effective_scope!r} and principal {ctx.principal!r}"
+        )
 
 
 def _decide_scope(ctx: SecurityContext, scope_key: str, action: PermissionAction) -> ScopeAccessDecision:

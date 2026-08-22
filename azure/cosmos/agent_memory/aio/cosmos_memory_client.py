@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Optional
 
-from azure.cosmos.agent_memory._authz import resolve_read_scopes, resolve_scope_access
+from azure.cosmos.agent_memory._authz import authorize_scope_write, resolve_read_scopes, resolve_scope_access
 from azure.cosmos.agent_memory._base import _BaseMemoryClient
 from azure.cosmos.agent_memory._base.base_client import is_transient_tail_step_error
 from azure.cosmos.agent_memory._container_routing import container_key_for_type
@@ -75,7 +75,15 @@ class _BoundAsyncCosmosMemoryClient:
         self.read_scopes = (
             list(read_scopes) if read_scopes is not None else resolve_read_scopes(ctx, project_scope=project_scope)
         )
-        self.user_id = user_id_from_principal(ctx.principal)
+        principal = ctx.principal
+        # See the sync bound client: user_id is only meaningful for delegated ``user:``
+        # principals; app-only ``agent:`` principals own an ``agent:<id>`` scope, so derive
+        # the id portion directly instead of through the user-only helper.
+        self.user_id = (
+            user_id_from_principal(principal)
+            if principal and principal.startswith("user:")
+            else (principal.split(":", 1)[1] if principal and ":" in principal else "")
+        )
 
     def __getattr__(self, name: str) -> Any:
         # See the sync bound client: bind the caller's tenant for any delegated method
@@ -111,6 +119,9 @@ class _BoundAsyncCosmosMemoryClient:
 
     def add_local(self, *args: Any, **kwargs: Any) -> None:
         kwargs.setdefault("user_id", self.user_id)
+        # See the sync bound client: authorize the buffered write at entry so an
+        # unauthorized scope never lands in the shared buffer that push_to_cosmos flushes.
+        authorize_scope_write(self.ctx, self.write_scope, self.user_id)
         self._client.add_local(*args, **kwargs)
         if self._client.local_memory:
             ensure_scope_fields(self._client.local_memory[-1], tenant_id=self.ctx.tenant_id, scope_key=self.write_scope)
@@ -522,24 +533,30 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
         logger.info("Async created memory store %s/%s", self._cosmos_database, self._cosmos_container)
 
     async def validate_topology(self) -> None:
-        """Verify all three Cosmos containers exist and are reachable.
+        """Verify the Cosmos containers exist, are reachable, and use the expected key.
 
-        Reads container metadata for memories / memories_turns / memories_summaries.
-        Raises ``RuntimeError`` on the first failure with a clear message
-        instructing the customer to redeploy the infrastructure.
+        Reads metadata for memories / memories_turns / memories_summaries and the counter
+        container, and checks each partition key is exactly the hierarchical
+        ``[/tenant_id, /scope_key, /thread_id]``. Raises ``RuntimeError`` on the first
+        failure with a clear message instructing the customer to redeploy the
+        infrastructure.
 
-        Call this after ``connect_cosmos`` or ``create_memory_store`` to
-        diagnose topology mismatches before any data is written.
+        Call this after ``connect_cosmos`` or ``create_memory_store`` to diagnose topology
+        mismatches before any data is written.
         """
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
         if self._memories_container_client is None:
             raise RuntimeError("validate_topology: Cosmos client is not connected; call connect_cosmos() first")
         expected_pk_paths = ["/tenant_id", "/scope_key", "/thread_id"]
-        for key, client in self._containers.items():
+        checks: list[tuple[str, Any]] = [(key.value, client) for key, client in self._containers.items()]
+        counter_client = self._get_counter_container()
+        if counter_client is not None:
+            checks.append((self._cosmos_counter_container, counter_client))
+        for label, client in checks:
             if client is None:
-                raise RuntimeError(f"validate_topology: container for {key.value!r} is not connected")
-            container_id = getattr(client, "id", key.value)
+                raise RuntimeError(f"validate_topology: container for {label!r} is not connected")
+            container_id = getattr(client, "id", label)
             try:
                 props = await client.read()
             except CosmosResourceNotFoundError as exc:
@@ -551,14 +568,18 @@ class AsyncCosmosMemoryClient(_BaseMemoryClient):
                 raise RuntimeError(
                     f"validate_topology: cannot read container {container_id!r}: {type(exc).__name__}: {exc}"
                 ) from exc
-            pk_def = props.get("partitionKey") if isinstance(props, dict) else None
-            actual_pk_paths = list(pk_def.get("paths") or []) if isinstance(pk_def, dict) else []
-            if actual_pk_paths and actual_pk_paths != expected_pk_paths:
-                raise RuntimeError(
-                    f"validate_topology: container {container_id!r} has partition key {actual_pk_paths} "
-                    f"but this SDK requires {expected_pk_paths}. The partition key is immutable in Cosmos; "
-                    f"redeploy the container with the current hierarchical key (tenant_id, scope_key, thread_id)"
-                )
+            # Only real container metadata (a dict) carries a partition key; test doubles
+            # that return a non-dict are skipped. When metadata is present the key must be
+            # exactly the hierarchical key - an empty/missing or 2-level key is rejected.
+            if isinstance(props, dict):
+                actual_pk_paths = list((props.get("partitionKey") or {}).get("paths") or [])
+                if actual_pk_paths != expected_pk_paths:
+                    raise RuntimeError(
+                        f"validate_topology: container {container_id!r} has partition key "
+                        f"{actual_pk_paths or 'none'} but this SDK requires {expected_pk_paths}. The partition key "
+                        f"is immutable in Cosmos; redeploy the container with the current hierarchical key "
+                        f"(tenant_id, scope_key, thread_id)"
+                    )
 
     def _build_store(self) -> AsyncMemoryStore:
         return AsyncMemoryStore(

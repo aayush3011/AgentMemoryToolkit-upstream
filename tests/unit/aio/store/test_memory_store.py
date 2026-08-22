@@ -48,6 +48,46 @@ def _containers(*, turns=None, memories=None, summaries=None):
     }
 
 
+async def test_add_to_foreign_scope_requires_write_authorization():
+    from azure.cosmos.agent_memory._security import SecurityContext
+
+    turns = MagicMock()
+    turns.upsert_item = AsyncMock()
+    store = AsyncMemoryStore(containers=_containers(turns=turns))
+
+    # No context: a foreign/shared scope is refused (fail closed).
+    with pytest.raises(ValidationError, match="requires a SecurityContext"):
+        await store.add(
+            user_id="alice", role="user", content="x", thread_id="t1", tenant_id="acme", scope_key="team:eng"
+        )
+    # Membership-only context is still refused for writes.
+    outsider = SecurityContext(tenant_id="acme", principal="user:alice", groups=["eng"])
+    with pytest.raises(ValidationError, match="write permission denied"):
+        await store.add(
+            user_id="alice",
+            role="user",
+            content="x",
+            thread_id="t1",
+            tenant_id="acme",
+            scope_key="team:eng",
+            ctx=outsider,
+        )
+    turns.upsert_item.assert_not_awaited()
+
+    # A writer role authorizes the shared-scope write.
+    writer = SecurityContext(tenant_id="acme", principal="user:alice", roles=["team:eng:writer"])
+    await store.add(
+        user_id="alice",
+        role="user",
+        content="x",
+        thread_id="t1",
+        tenant_id="acme",
+        scope_key="team:eng",
+        ctx=writer,
+    )
+    assert turns.upsert_item.await_count == 1
+
+
 async def test_add_upserts_memory_document():
     turns = MagicMock()
     turns.upsert_item = AsyncMock()

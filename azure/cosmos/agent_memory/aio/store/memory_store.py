@@ -8,7 +8,12 @@ import inspect
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from azure.cosmos.agent_memory._authz import PermissionAction, can, resolve_scope_access
+from azure.cosmos.agent_memory._authz import (
+    PermissionAction,
+    authorize_scope_write,
+    can,
+    resolve_scope_access,
+)
 from azure.cosmos.agent_memory._container_routing import (
     _CONTAINER_FOR_TYPE,
     USER_SCOPED_MEMORIES_TYPES,
@@ -202,27 +207,8 @@ class AsyncMemoryStore:
         return False
 
     def _authorize_write(self, ctx: SecurityContext | None, scope_key: str | None, user_id: str) -> None:
-        """Refuse a write into a non-owner placement scope without write authorization.
-
-        Writing to the caller's own ``user:<user_id>`` private scope needs no context
-        (the pre-existing single-user trust model). Any other placement scope - a team,
-        project, org, global, or another principal's scope - requires a SecurityContext
-        that holds write access for it (member/writer role, admin, or its own principal
-        scope). This is the backstop that keeps a caller-supplied ``scope_key`` from
-        landing an unauthorized record in a shared or foreign scope.
-        """
-        if not scope_key:
-            return
-        if scope_key == scope_key_for_user(user_id):
-            return
-        if ctx is None:
-            raise ValidationError(
-                f"writing to scope {scope_key!r} requires a SecurityContext with write permission"
-            )
-        if scope_key not in resolve_scope_access(ctx, [scope_key], "write").allowed_scopes:
-            raise ValidationError(
-                f"write permission denied for scope_key={scope_key!r} and principal {ctx.principal!r}"
-            )
+        """Refuse a write into a non-owner placement scope (see ``authorize_scope_write``)."""
+        authorize_scope_write(ctx, scope_key, user_id)
 
     def _shared_scopes_need_ctx(
         self, ctx: SecurityContext | None, scope_keys: list[str], user_id: str | None
@@ -551,8 +537,6 @@ class AsyncMemoryStore:
         ctx: SecurityContext,
     ) -> dict[str, Any]:
         """Copy a memory into ``to_scope`` after share/assign authorization."""
-        if ctx.tenant_id != scope_values_for_scope_key(to_scope, ctx.tenant_id)[0]:
-            raise ValidationError("target scope tenant does not match SecurityContext tenant")
         await self._require_promote_permission(ctx, to_scope)
         if from_scope not in (await self._resolve_scope_action(ctx, from_scope, "read")).allowed_scopes:
             raise ValidationError(

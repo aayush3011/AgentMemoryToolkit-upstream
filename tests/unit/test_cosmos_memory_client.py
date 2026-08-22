@@ -400,6 +400,16 @@ class TestValidateTopology:
         turns.read.assert_called_once()
         summaries.read.assert_called_once()
 
+    def test_validate_topology_raises_on_partition_key_mismatch(self):
+        mem = _make_client()
+        stale_pk = {"partitionKey": {"paths": ["/user_id", "/thread_id"]}}
+        for attr in ("_memories_container_client", "_turns_container_client", "_summaries_container_client"):
+            setattr(mem, attr, MagicMock(id=attr))
+            getattr(mem, attr).read.return_value = stale_pk
+
+        with pytest.raises(RuntimeError, match="partition key"):
+            mem.validate_topology()
+
     def test_validate_topology_raises_on_missing_container(self):
         from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
